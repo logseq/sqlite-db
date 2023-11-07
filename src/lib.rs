@@ -5,6 +5,7 @@ use std::{
     ptr,
     sync::{atomic::AtomicBool, Arc, RwLock},
     thread,
+    time::SystemTime,
 };
 
 use js_sys::{
@@ -269,6 +270,8 @@ pub async fn init() -> Result<(), JsValue> {
         env!("CARGO_PKG_VERSION")
     );
 
+    set_panic_hook();
+
     // open all files
     let global_this = js_sys::global().dyn_into::<web_sys::WorkerGlobalScope>()?;
     let navigator = global_this.navigator();
@@ -476,10 +479,10 @@ unsafe extern "C" fn opfs_vfs_access(
 
 unsafe extern "C" fn opfs_vfs_fullpathname(
     arg1: *mut sqlite3_vfs,
-    zName: *const ::std::os::raw::c_char,
-    nOut: ::std::os::raw::c_int,
-    zOut: *mut ::std::os::raw::c_char,
-) -> ::std::os::raw::c_int {
+    zName: *const c_char,
+    nOut: c_int,
+    zOut: *mut c_char,
+) -> c_int {
     console_log!("opfs_vfs_fullpathname");
 
     let name = CStr::from_ptr(zName).to_str().unwrap();
@@ -495,15 +498,43 @@ unsafe extern "C" fn opfs_vfs_fullpathname(
 
 unsafe extern "C" fn opfs_vfs_randomness(
     arg1: *mut sqlite3_vfs,
-    nByte: ::std::os::raw::c_int,
-    zOut: *mut ::std::os::raw::c_char,
-) -> ::std::os::raw::c_int {
+    nByte: c_int,
+    zOut: *mut c_char,
+) -> c_int {
     console_log!("opfs_vfs_randomness");
 
     let buf = slice::from_raw_parts_mut(zOut as *mut u8, nByte as usize);
 
     getrandom::getrandom(buf).unwrap();
 
+    SQLITE_OK
+}
+
+unsafe extern "C" fn opfs_vfs_sleep(arg1: *mut sqlite3_vfs, microseconds: c_int) -> c_int {
+    console_log!("opfs_vfs_sleep");
+
+    SQLITE_OK
+}
+
+unsafe extern "C" fn opfs_vfs_currenttime(arg1: *mut sqlite3_vfs, arg2: *mut f64) -> c_int {
+    console_log!("opfs_vfs_currenttime");
+
+    let t = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+
+    *arg2 = t;
+
+    SQLITE_OK
+}
+
+unsafe extern "C" fn opfs_vfs_get_last_error(
+    arg1: *mut sqlite3_vfs,
+    arg2: c_int,
+    arg3: *mut c_char,
+) -> c_int {
+    unimplemented!("opfs_vfs_get_last_error");
     SQLITE_OK
 }
 
@@ -528,7 +559,7 @@ pub fn init_sqlite() -> Result<(), JsValue> {
         xRandomness: Some(opfs_vfs_randomness),
         xSleep: Some(opfs_vfs_sleep),
         xCurrentTime: Some(opfs_vfs_currenttime),
-        xGetLastError: None,
+        xGetLastError: Some(opfs_vfs_get_last_error),
         // The methods above are in version 1 of the sqlite_vfs object definition
         xCurrentTimeInt64: None,
         xSetSystemCall: None,

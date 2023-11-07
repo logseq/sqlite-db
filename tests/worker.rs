@@ -11,13 +11,9 @@ wasm_bindgen_test_configure!(run_in_worker);
 
 #[wasm_bindgen_test]
 fn sqlite_version() {
-    //    logseq_sqlite::preinit();
-    //  assert_eq!(1 + 1, 2);
-
     let x = logseq_sqlite::get_version();
     assert_eq!(x, "3.42.0".to_string());
     logseq_sqlite::log(&format!("sqlite version: {}", x));
-
     //    logseq_sqlite::dummy();
 }
 
@@ -29,8 +25,9 @@ async fn opfs_ok() {
 }
 
 #[wasm_bindgen_test]
-async fn a_demo() {
-    let x = logseq_sqlite::init().await.unwrap();
+async fn library_init() {
+    logseq_sqlite::init().await.unwrap();
+    logseq_sqlite::init_sqlite().unwrap();
 
     //    assert_eq!(x, "".to_string());
 }
