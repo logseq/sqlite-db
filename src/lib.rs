@@ -226,7 +226,7 @@ async fn list_all_raw_files(
     let entries = Reflect::apply(entries_fn.unchecked_ref(), &root, &Array::new())?;
 
     let entries = entries_to_vec(&entries).await?;
-    console_log!("entries: {:#?}", entries);
+    // console_log!("entries: {:#?}", entries);
     Ok(entries)
 }
 
@@ -291,13 +291,10 @@ pub async fn init() -> Result<(), JsValue> {
     } else {
         let size = metadata_file.get_size()?;
         let mut buf = vec![0; size as usize];
-        let nread = metadata_file.read_with_u8_array(&mut buf[..])?;
+        let _nread = metadata_file.read_with_u8_array(&mut buf[..])?;
         let text = String::from_utf8(buf).unwrap();
         let jsobj = JSON::parse(&text).unwrap();
         let metadata: GlobalMetadata = serde_wasm_bindgen::from_value(jsobj).unwrap();
-
-        console_log!("read: {}", nread);
-        console_log!("read: {:#?}", metadata);
 
         metadata
     };
@@ -447,8 +444,15 @@ pub unsafe extern "C" fn opfs_vfs_open(
     console_log!("opfs_vfs_open");
 
     let name = CStr::from_ptr(zName).to_str().unwrap();
-
     console_log!("open file name => {}", name);
+
+    if SQLITE_OPEN_CREATE & flags == SQLITE_OPEN_CREATE {
+        console_log!("create file");
+    }
+
+    //let file = pFile as *mut FileHandle;
+    //(*file)._super.pMethods = &IO_METHODS;
+    //(*file).sah = POOL.get_file_handle(name).unwrap();
 
     SQLITE_ERROR
 }
@@ -649,7 +653,6 @@ pub fn has_opfs_support() -> bool {
                     log("no createSyncAccessHandle");
                     return false;
                 }
-                console_log!("createSyncAccessHandle: {:?}", f);
             }
         }
     }
@@ -677,4 +680,20 @@ pub fn has_opfs_support() -> bool {
     }
 
     true
+}
+
+pub fn dummy_create() -> Result<(), JsValue> {
+    unsafe {
+        let filename = CString::new("test.db").unwrap();
+        let mut db = ptr::null_mut();
+        let ret = sqlite3_open_v2(
+            filename.as_ptr(),
+            &mut db,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+            ptr::null_mut(),
+        );
+        console_log!("=> open db {}", ret);
+    }
+
+    Ok(())
 }

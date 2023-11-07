@@ -14,14 +14,12 @@ fn sqlite_version() {
     let x = logseq_sqlite::get_version();
     assert_eq!(x, "3.42.0".to_string());
     logseq_sqlite::log(&format!("sqlite version: {}", x));
-    //    logseq_sqlite::dummy();
 }
 
 #[wasm_bindgen_test]
 async fn opfs_ok() {
     let has_opfs_support = logseq_sqlite::has_opfs_support();
     assert_eq!(has_opfs_support, true);
-    logseq_sqlite::log("good =>");
 }
 
 #[wasm_bindgen_test]
@@ -30,11 +28,7 @@ async fn library_init() {
     logseq_sqlite::init_sqlite().unwrap();
 
     //    assert_eq!(x, "".to_string());
-}
 
-/* [wasm_bindgen_test]
-async fn dummy() {
-    let x = logseq_sqlite::open_file_handle_pool().await;
-    logseq_sqlite::log(&format!("open_file_handle_pool: {:?}", x));
+    logseq_sqlite::dummy_create().unwrap();
+    logseq_sqlite::log("all done");
 }
-*/
