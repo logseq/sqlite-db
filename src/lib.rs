@@ -40,11 +40,6 @@ pub struct GlobalMetadata {
     files: HashMap<String, String>,
 }
 
-static mut FILE_POOL: Lazy<RwLock<HashMap<String, FileSystemSyncAccessHandle>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
-
-static mut METADATA: Option<GlobalMetadata> = None;
-
 /// File handle, inherits sqlite3_file
 #[repr(C)]
 pub struct FileHandle {
@@ -168,14 +163,12 @@ impl Pool {
             let mut get_file_opts = &FileSystemGetFileOptions::default();
             Reflect::set(&mut get_file_opts, &"create".into(), &true.into())?;
 
-            console_log!("opt=> {}", js_sys::JSON::stringify(&get_file_opts).unwrap());
             let file_handle: FileSystemFileHandle =
                 JsFuture::from(root.get_file_handle_with_options(&name, &get_file_opts))
                     .await?
                     .into();
 
-            console_log!("opfs_root: {:?}", root);
-            console_log!("file_handle: {:?}", file_handle);
+            console_log!("create new empty file {}", name);
 
             let sync_handle: FileSystemSyncAccessHandle =
                 JsFuture::from(file_handle.create_sync_access_handle())
@@ -237,11 +230,9 @@ impl Pool {
         self.persist_metadata()?;
 
         // create more empty files
-        if self.metadata.read().unwrap().empty_files.len() < 10 {
+        if self.metadata.read().unwrap().empty_files.len() < 20 {
             self.init_empty_files(&opfs_root, 10).await?;
         }
-
-        // console_log!("metadata: {:#?}", unsafe { &METADATA });
 
         Ok(())
     }
@@ -321,11 +312,6 @@ async fn get_file_handle_from_root(
     root: &FileSystemDirectoryHandle,
     path: &str,
 ) -> Result<FileSystemSyncAccessHandle, JsValue> {
-    if let Some(sync_handle) = unsafe { FILE_POOL.read().unwrap().get(path) } {
-        console_log!("already opened {}", path);
-        return Ok(sync_handle.clone());
-    }
-
     let mut opts = &FileSystemGetFileOptions::default();
     Reflect::set(&mut opts, &"create".into(), &true.into())?;
 
@@ -337,13 +323,6 @@ async fn get_file_handle_from_root(
         JsFuture::from(handle.create_sync_access_handle())
             .await?
             .into();
-
-    unsafe {
-        FILE_POOL
-            .write()
-            .unwrap()
-            .insert(path.to_string(), sync_handle.clone());
-    }
 
     Ok(sync_handle)
 }
@@ -478,17 +457,17 @@ static IO_METHODS: sqlite3_io_methods = sqlite3_io_methods {
 
 pub unsafe extern "C" fn opfs_vfs_open(
     _vfs: *mut sqlite3_vfs,
-    raw_name: *const c_char,
-    raw_file: *mut sqlite3_file,
+    fname: *const c_char,
+    fobj: *mut sqlite3_file,
     flags: c_int,
     out_flags: *mut c_int,
 ) -> c_int {
     console_log!("opfs_vfs_open");
 
-    let name = CStr::from_ptr(raw_name).to_str().unwrap();
+    let name = CStr::from_ptr(fname).to_str().unwrap();
     console_log!("open file name => {}", name);
 
-    let file = raw_file as *mut FileHandle;
+    let file = fobj as *mut FileHandle;
     (*file)._super.pMethods = &IO_METHODS;
 
     if SQLITE_OPEN_CREATE & flags == SQLITE_OPEN_CREATE {
@@ -509,13 +488,13 @@ pub unsafe extern "C" fn opfs_vfs_open(
     SQLITE_OK
 }
 unsafe extern "C" fn opfs_vfs_delete(
-    arg1: *mut sqlite3_vfs,
-    zName: *const c_char,
+    _: *mut sqlite3_vfs,
+    fname: *const c_char,
     syncDir: c_int,
 ) -> c_int {
     console_log!("opfs_vfs_delete");
 
-    let name = CStr::from_ptr(zName).to_str().unwrap();
+    let name = CStr::from_ptr(fname).to_str().unwrap();
     console_log!("delete file name => {}", name);
 
     SQLITE_ERROR
@@ -539,9 +518,10 @@ unsafe extern "C" fn opfs_vfs_fullpathname(
     nOut: c_int,
     zOut: *mut c_char,
 ) -> c_int {
-    console_log!("opfs_vfs_fullpathname");
-
     let name = CStr::from_ptr(zName).to_str().unwrap();
+
+    console_log!("opfs_vfs_fullpathname: {}", name);
+
     let n = name.len();
     if n > nOut as usize {
         return SQLITE_CANTOPEN;
