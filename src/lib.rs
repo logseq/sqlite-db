@@ -25,6 +25,8 @@ use web_sys::{
 
 pub mod vfs;
 
+const METADATA_FILENAME: &str = "metadata.bincode";
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GlobalMetadata {
     // init at library load, load all sync access handles
@@ -43,17 +45,17 @@ static mut FILE_POOL: Lazy<RwLock<HashMap<String, FileSystemSyncAccessHandle>>> 
 
 static mut METADATA: Option<GlobalMetadata> = None;
 
+/// File handle, inherits sqlite3_file
 #[repr(C)]
 pub struct FileHandle {
     _super: sqlite3_file,
-    sah: FileSystemSyncAccessHandle,
+    fname: String,
 }
 
 /// The pool
 struct Pool {
     metadata: RwLock<GlobalMetadata>,
     handle_pool: RwLock<HashMap<String, FileSystemSyncAccessHandle>>,
-
     sqlite_files: RwLock<HashMap<String, FileHandle>>,
 }
 
@@ -68,33 +70,45 @@ static mut POOL: Lazy<Pool> = Lazy::new(|| Pool {
 });
 
 impl Pool {
-    pub fn read(&self, handle: &FileHandle, buf: &mut [u8], offset: u64) -> Result<(), JsValue> {
-        let mut opts = FileSystemReadWriteOptions::default();
-        Reflect::set(&mut opts, &"at".into(), &0.into())?;
-
-        handle.sah.read_with_u8_array_and_options(buf, &opts)?;
-
-        Ok(())
+    fn get_file_handle(&self, path: &str) -> Result<FileSystemSyncAccessHandle, JsValue> {
+        let meta = self.metadata.read().unwrap();
+        if let Some(mapped_path) = meta.files.get(path) {
+            let pool = self.handle_pool.read().unwrap();
+            let handle = pool.get(&*mapped_path).unwrap();
+            return Ok(handle.clone());
+        } else {
+            return Err(JsValue::from_str("file not found"));
+        }
     }
 
-    pub fn write(&self, handle: &FileHandle, buf: &[u8], offset: u64) -> Result<(), JsValue> {
-        let mut opts = FileSystemReadWriteOptions::default();
-        Reflect::set(&mut opts, &"at".into(), &0.into())?;
+    fn get_or_create_file(&self, path: &str) -> Result<FileSystemSyncAccessHandle, JsValue> {
+        if let Ok(handle) = self.get_file_handle(path) {
+            return Ok(handle);
+        } else {
+            // find a empty file
+            let handle = {
+                let mut meta = self.metadata.write().unwrap();
+                let pool = self.handle_pool.read().unwrap();
 
-        handle.sah.write_with_u8_array_and_options(buf, &opts)?;
+                let empty_file = meta.empty_files.pop().unwrap();
+                let handle = pool.get(&empty_file).unwrap().clone();
+                console_log!("alloc file: {} for {}", empty_file, path);
+                meta.files.insert(path.to_string(), empty_file);
+                handle
+            };
+            self.persist_metadata()?;
 
-        Ok(())
+            Ok(handle)
+        }
     }
-}
 
-impl GlobalMetadata {
-    pub fn persist(&self) -> Result<(), JsValue> {
-        let pool = unsafe { FILE_POOL.read().unwrap() };
-        let handle = pool.get("metadata.json").unwrap();
+    pub fn persist_metadata(&self) -> Result<(), JsValue> {
+        let pool = self.handle_pool.read().unwrap();
+        let handle = pool.get(METADATA_FILENAME).unwrap();
 
-        let jsmeta = serde_wasm_bindgen::to_value(self).unwrap();
-        let s = JSON::stringify(&jsmeta).unwrap();
-        let raw = s.as_string().unwrap().as_bytes().to_vec();
+        console_log!("persist metadata");
+
+        let raw = bincode::serialize(&*self.metadata.read().unwrap()).unwrap();
 
         let mut opts = FileSystemReadWriteOptions::default();
         Reflect::set(&mut opts, &"at".into(), &0.into())?;
@@ -107,26 +121,46 @@ impl GlobalMetadata {
         Ok(())
     }
 
-    fn get_file_handle(&self, path: &str) -> Result<FileSystemSyncAccessHandle, JsValue> {
-        if let Some(mapped_path) = self.files.get(path) {
-            let pool = unsafe { FILE_POOL.read().unwrap() };
-            let handle = pool.get(&*mapped_path).unwrap();
-            return Ok(handle.clone());
-        } else {
-            return Err(JsValue::from_str("file not found"));
-        }
+    pub fn read(&self, handle: &FileHandle, buf: &mut [u8], offset: u64) -> Result<(), JsValue> {
+        let mut opts = FileSystemReadWriteOptions::default();
+        Reflect::set(&mut opts, &"at".into(), &(offset as f64).into())?;
+
+        let handle = self.get_file_handle(&handle.fname)?;
+        handle.read_with_u8_array_and_options(buf, &opts)?;
+
+        Ok(())
     }
 
-    /// Get file size by mapped file name
+    pub fn write(&self, handle: &FileHandle, buf: &[u8], offset: u64) -> Result<(), JsValue> {
+        let mut opts = FileSystemReadWriteOptions::default();
+        Reflect::set(&mut opts, &"at".into(), &(offset as f64).into())?;
+
+        let handle = self.get_file_handle(&handle.fname)?;
+
+        handle.write_with_u8_array_and_options(buf, &opts)?;
+
+        Ok(())
+    }
+
     pub fn file_size(&self, path: &str) -> Result<u64, JsValue> {
         let handle = self.get_file_handle(path)?;
-
         let size = handle.get_size()?;
         Ok(size as _)
     }
 
-    // allocate n empty files
-    async fn init_empty_files(root: &FileSystemDirectoryHandle, n: usize) -> Result<(), JsValue> {
+    fn add_new_empty_file(&self, name: String, handle: FileSystemSyncAccessHandle) {
+        let mut pool = self.handle_pool.write().unwrap();
+        pool.insert(name.clone(), handle);
+
+        let mut meta = self.metadata.write().unwrap();
+        meta.empty_files.push(name);
+    }
+
+    async fn init_empty_files(
+        &self,
+        root: &FileSystemDirectoryHandle,
+        n: usize,
+    ) -> Result<(), JsValue> {
         for _ in 0..n {
             let name = Uuid::new_v4().to_string() + ".raw";
             console_log!("create empty file: {}", name);
@@ -147,18 +181,71 @@ impl GlobalMetadata {
                 JsFuture::from(file_handle.create_sync_access_handle())
                     .await?
                     .into();
-            if let Ok(mut pool) = unsafe { FILE_POOL.write() } {
-                pool.insert(name.clone(), sync_handle);
-            }
-            unsafe {
-                METADATA.as_mut().unwrap().empty_files.push(name);
-            }
+
+            self.add_new_empty_file(name, sync_handle);
         }
         Ok(())
     }
-}
 
-pub struct WrappedFs {}
+    // load from metadata.json
+    pub async fn init(&self) -> Result<(), JsValue> {
+        let global_this = js_sys::global().dyn_into::<web_sys::WorkerGlobalScope>()?;
+        let navigator = global_this.navigator();
+
+        let opfs_root: FileSystemDirectoryHandle =
+            JsFuture::from(navigator.storage().get_directory())
+                .await?
+                .into();
+
+        let metadata_file = get_file_handle_from_root(&opfs_root, METADATA_FILENAME).await?;
+        let mut metadata = if metadata_file.get_size()? as u64 == 0 {
+            // create new metadata
+            GlobalMetadata {
+                version: 1,
+                empty_files: Vec::new(),
+                files: HashMap::new(),
+            }
+        } else {
+            let size = metadata_file.get_size()?;
+            let mut buf = vec![0; size as usize];
+            let _nread = metadata_file.read_with_u8_array(&mut buf[..])?;
+            let metadata = bincode::deserialize(&buf).unwrap();
+
+            metadata
+        };
+
+        console_log!("loading init metadata: {:#?}", metadata);
+
+        // initial persist
+        {
+            let mut pool = self.handle_pool.write().unwrap();
+            pool.insert(METADATA_FILENAME.to_string(), metadata_file);
+        }
+
+        let entries = list_all_raw_files(&opfs_root).await?;
+        for (path, handle) in entries {
+            if !metadata.empty_files.contains(&path) && !metadata.files.contains_key(&path) {
+                metadata.empty_files.push(path.clone());
+            }
+
+            let mut pool = self.handle_pool.write().unwrap();
+            pool.insert(path.clone(), handle);
+        }
+
+        *self.metadata.write().unwrap() = metadata;
+
+        self.persist_metadata()?;
+
+        // create more empty files
+        if self.metadata.read().unwrap().empty_files.len() < 10 {
+            self.init_empty_files(&opfs_root, 10).await?;
+        }
+
+        // console_log!("metadata: {:#?}", unsafe { &METADATA });
+
+        Ok(())
+    }
+}
 
 #[wasm_bindgen]
 extern "C" {
@@ -230,7 +317,7 @@ async fn list_all_raw_files(
     Ok(entries)
 }
 
-async fn get_file_handle(
+async fn get_file_handle_from_root(
     root: &FileSystemDirectoryHandle,
     path: &str,
 ) -> Result<FileSystemSyncAccessHandle, JsValue> {
@@ -272,54 +359,9 @@ pub async fn init() -> Result<(), JsValue> {
 
     set_panic_hook();
 
-    // open all files
-    let global_this = js_sys::global().dyn_into::<web_sys::WorkerGlobalScope>()?;
-    let navigator = global_this.navigator();
-
-    let opfs_root: FileSystemDirectoryHandle = JsFuture::from(navigator.storage().get_directory())
-        .await?
-        .into();
-
-    let metadata_file = get_file_handle(&opfs_root, "metadata.json").await?;
-    let mut metadata = if metadata_file.get_size()? as u64 == 0 {
-        // create new metadata
-        GlobalMetadata {
-            version: 1,
-            empty_files: Vec::new(),
-            files: HashMap::new(),
-        }
-    } else {
-        let size = metadata_file.get_size()?;
-        let mut buf = vec![0; size as usize];
-        let _nread = metadata_file.read_with_u8_array(&mut buf[..])?;
-        let text = String::from_utf8(buf).unwrap();
-        let jsobj = JSON::parse(&text).unwrap();
-        let metadata: GlobalMetadata = serde_wasm_bindgen::from_value(jsobj).unwrap();
-
-        metadata
-    };
-
-    let entries = list_all_raw_files(&opfs_root).await?;
-    for (path, handle) in entries {
-        if !metadata.empty_files.contains(&path) && !metadata.files.contains_key(&path) {
-            metadata.empty_files.push(path.clone());
-        }
-
-        let mut pool = unsafe { FILE_POOL.write().unwrap() };
-        pool.insert(path.clone(), handle);
-    }
-
     unsafe {
-        METADATA = Some(metadata);
-        METADATA.as_ref().unwrap().persist()?;
+        POOL.init().await?;
     }
-
-    // create more empty files
-    if unsafe { METADATA.as_ref().unwrap().empty_files.len() < 10 } {
-        GlobalMetadata::init_empty_files(&opfs_root, 10).await?;
-    }
-
-    console_log!("metadata: {:#?}", unsafe { &METADATA });
 
     Ok(())
 }
@@ -341,12 +383,12 @@ unsafe extern "C" fn x_read(
 
     let file: *mut FileHandle = arg1 as _;
 
-    let mut buf = slice::from_raw_parts_mut(arg2 as *mut u8, iAmt as usize);
+    let buf = slice::from_raw_parts_mut(arg2 as *mut u8, iAmt as usize);
     POOL.read(&*file, buf, iOfst as _).unwrap();
 
     SQLITE_OK
 }
-unsafe extern "C" fn xWrite(
+unsafe extern "C" fn x_write(
     arg1: *mut sqlite3_file,
     arg2: *const c_void,
     iAmt: c_int,
@@ -365,7 +407,7 @@ unsafe extern "C" fn x_truncate(arg1: *mut sqlite3_file, size: sqlite3_int64) ->
     console_log!("xTruncate: {}", size);
 
     let file: *mut FileHandle = arg1 as _;
-    (&*file).sah.truncate_with_u32(size as u32).unwrap();
+    //(&*file).sah.truncate_with_u32(size as u32).unwrap();
 
     SQLITE_OK
 }
@@ -373,7 +415,7 @@ unsafe extern "C" fn x_sync(arg1: *mut sqlite3_file, flags: c_int) -> c_int {
     console_log!("xSync: {}", flags);
 
     let file: *mut FileHandle = arg1 as _;
-    (&*file).sah.flush().unwrap();
+    // (&*file).sah.flush().unwrap();
 
     SQLITE_OK
 }
@@ -381,8 +423,8 @@ unsafe extern "C" fn x_file_size(arg1: *mut sqlite3_file, pSize: *mut sqlite3_in
     console_log!("calling file size");
 
     let file: *mut FileHandle = arg1 as _;
-    let sz = (&*file).sah.get_size().unwrap() as i64;
-    *pSize = sz;
+
+    *pSize = POOL.file_size(&(*file).fname).unwrap() as _;
 
     SQLITE_OK
 }
@@ -413,7 +455,7 @@ static IO_METHODS: sqlite3_io_methods = sqlite3_io_methods {
     iVersion: 1,
     xClose: Some(x_close),
     xRead: Some(x_read),
-    xWrite: Some(xWrite),
+    xWrite: Some(x_write),
     xTruncate: Some(x_truncate),
     xSync: Some(x_sync),
     xFileSize: Some(x_file_size),
@@ -432,29 +474,39 @@ static IO_METHODS: sqlite3_io_methods = sqlite3_io_methods {
     xUnfetch: None,
 };
 
-// vfs layer
+// - vfs layer
 
 pub unsafe extern "C" fn opfs_vfs_open(
-    pVfs: *mut sqlite3_vfs,
-    zName: *const c_char,
-    pFile: *mut sqlite3_file,
+    _vfs: *mut sqlite3_vfs,
+    raw_name: *const c_char,
+    raw_file: *mut sqlite3_file,
     flags: c_int,
-    pOutFlags: *mut c_int,
+    out_flags: *mut c_int,
 ) -> c_int {
     console_log!("opfs_vfs_open");
 
-    let name = CStr::from_ptr(zName).to_str().unwrap();
+    let name = CStr::from_ptr(raw_name).to_str().unwrap();
     console_log!("open file name => {}", name);
+
+    let file = raw_file as *mut FileHandle;
+    (*file)._super.pMethods = &IO_METHODS;
 
     if SQLITE_OPEN_CREATE & flags == SQLITE_OPEN_CREATE {
         console_log!("create file");
+
+        let handle = POOL.get_or_create_file(name).unwrap();
+        (*file).fname = name.to_string();
+    } else {
+        console_log!("open file");
+
+        let handle = POOL.get_file_handle(name).unwrap();
+        (*file).fname = name.to_string();
     }
+    *out_flags = flags;
 
-    //let file = pFile as *mut FileHandle;
-    //(*file)._super.pMethods = &IO_METHODS;
-    //(*file).sah = POOL.get_file_handle(name).unwrap();
+    console_log!("created => {:p}", file);
 
-    SQLITE_ERROR
+    SQLITE_OK
 }
 unsafe extern "C" fn opfs_vfs_delete(
     arg1: *mut sqlite3_vfs,
@@ -599,6 +651,7 @@ mod tests {
     }
 }
 
+#[wasm_bindgen]
 pub fn set_panic_hook() {
     // When the `console_error_panic_hook` feature is enabled, we can call the
     // `set_panic_hook` function at least once during initialization, and then
@@ -693,6 +746,7 @@ pub fn dummy_create() -> Result<(), JsValue> {
             ptr::null_mut(),
         );
         console_log!("=> open db {}", ret);
+        console_log!("=> db {:?}", db);
     }
 
     Ok(())
