@@ -3,24 +3,20 @@ use std::{
     collections::HashMap,
     ffi::{c_char, c_int, c_void, CStr, CString},
     ptr,
-    sync::{atomic::AtomicBool, Arc, RwLock},
-    thread,
+    sync::RwLock,
     time::SystemTime,
 };
 
-use js_sys::{
-    Array, ArrayBuffer, Atomics, DataView, Function, Int32Array, Object, Promise, Reflect,
-    SharedArrayBuffer, JSON,
-};
+use js_sys::{Array, Function, Promise, Reflect};
 use libsqlite3_sys::*;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::{spawn_local, JsFuture};
+use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    FileSystemDirectoryHandle, FileSystemFileHandle, FileSystemGetFileOptions, FileSystemHandle,
-    FileSystemReadWriteOptions, FileSystemSyncAccessHandle, TextDecoder, TextEncoder,
+    FileSystemDirectoryHandle, FileSystemFileHandle, FileSystemGetFileOptions,
+    FileSystemReadWriteOptions, FileSystemSyncAccessHandle,
 };
 
 pub mod vfs;
@@ -45,6 +41,15 @@ pub struct GlobalMetadata {
 pub struct FileHandle {
     _super: sqlite3_file,
     fname: String,
+    flags: i32,
+    /*
+    #define SQLITE_LOCK_NONE          0       /* xUnlock() only */
+    #define SQLITE_LOCK_SHARED        1       /* xLock() or xUnlock() */
+    #define SQLITE_LOCK_RESERVED      2       /* xLock() only */
+    #define SQLITE_LOCK_PENDING       3       /* xLock() only */
+    #define SQLITE_LOCK_EXCLUSIVE     4       /* xLock() only */
+     */
+    lock: i32,
 }
 
 /// The pool
@@ -137,6 +142,12 @@ impl Pool {
         Ok(())
     }
 
+    pub fn flush(&self, handle: &FileHandle) -> Result<(), JsValue> {
+        let handle = self.get_file_handle(&handle.fname)?;
+        handle.flush()?;
+        Ok(())
+    }
+
     pub fn file_size(&self, path: &str) -> Result<u64, JsValue> {
         let handle = self.get_file_handle(path)?;
         let size = handle.get_size()?;
@@ -167,8 +178,6 @@ impl Pool {
                 JsFuture::from(root.get_file_handle_with_options(&name, &get_file_opts))
                     .await?
                     .into();
-
-            console_log!("create new empty file {}", name);
 
             let sync_handle: FileSystemSyncAccessHandle =
                 JsFuture::from(file_handle.create_sync_access_handle())
@@ -347,8 +356,30 @@ pub async fn init() -> Result<(), JsValue> {
 
 // sqlite part
 const SECTOR_SIZE: u32 = 4096;
-unsafe extern "C" fn x_close(arg1: *mut sqlite3_file) -> c_int {
-    console_log!("TODO: xclose");
+unsafe extern "C" fn x_close(fobj: *mut sqlite3_file) -> c_int {
+    console_log!("xClose");
+
+    let file = &mut *(fobj as *mut FileHandle);
+    POOL.flush(file).unwrap();
+
+    if file.flags & SQLITE_OPEN_DELETEONCLOSE != 0 {
+        console_log!("delete on close");
+
+        let mut meta = POOL.metadata.write().unwrap();
+        let pool = POOL.handle_pool.write().unwrap();
+
+        let fname = &file.fname;
+        let mapped_path = meta.files.get(fname).unwrap().clone();
+
+        let handle = pool.get(&mapped_path).unwrap();
+
+        meta.files.remove(fname);
+        meta.empty_files.push(mapped_path);
+
+        handle.truncate_with_u32(0).unwrap();
+
+        POOL.persist_metadata().unwrap();
+    }
 
     SQLITE_OK
 }
@@ -407,12 +438,20 @@ unsafe extern "C" fn x_file_size(arg1: *mut sqlite3_file, pSize: *mut sqlite3_in
 
     SQLITE_OK
 }
-unsafe extern "C" fn x_lock(arg1: *mut sqlite3_file, arg2: c_int) -> c_int {
-    console_log!("TODO: lock");
+unsafe extern "C" fn x_lock(arg1: *mut sqlite3_file, lock_type: c_int) -> c_int {
+    console_log!("xLock {}", lock_type);
+
+    let file: *mut FileHandle = arg1 as _;
+    (*file).lock = lock_type;
+
     SQLITE_OK
 }
-unsafe extern "C" fn x_unlock(arg1: *mut sqlite3_file, arg2: c_int) -> c_int {
-    console_log!("TODO: unlock");
+unsafe extern "C" fn x_unlock(arg1: *mut sqlite3_file, lock_type: c_int) -> c_int {
+    console_log!("xUnlock {}", lock_type);
+
+    let file: *mut FileHandle = arg1 as _;
+    (*file).lock = lock_type;
+
     SQLITE_OK
 }
 unsafe extern "C" fn x_check_reserved_lock(arg1: *mut sqlite3_file, pResOut: *mut c_int) -> c_int {
@@ -481,6 +520,8 @@ pub unsafe extern "C" fn opfs_vfs_open(
         let handle = POOL.get_file_handle(name).unwrap();
         (*file).fname = name.to_string();
     }
+    (*file).flags = flags; // save open flags
+
     *out_flags = flags;
 
     console_log!("created => {:p}", file);
@@ -727,6 +768,9 @@ pub fn dummy_create() -> Result<(), JsValue> {
         );
         console_log!("=> open db {}", ret);
         console_log!("=> db {:?}", db);
+
+        let ret = sqlite3_close_v2(db);
+        console_log!("=> close db {}", ret);
     }
 
     Ok(())
