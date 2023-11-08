@@ -541,16 +541,23 @@ unsafe extern "C" fn opfs_vfs_delete(
     SQLITE_ERROR
 }
 unsafe extern "C" fn opfs_vfs_access(
-    arg1: *mut sqlite3_vfs,
-    zName: *const c_char,
-    flags: c_int,
-    pResOut: *mut c_int,
+    _: *mut sqlite3_vfs,
+    fname: *const c_char,
+    _flags: c_int,
+    res_out: *mut c_int,
 ) -> c_int {
-    let name = CStr::from_ptr(zName).to_str().unwrap();
-    console_log!("access file name => {}", name);
-    console_log!("flags => {}", flags);
+    let name = CStr::from_ptr(fname).to_str().unwrap();
 
-    SQLITE_ERROR
+
+    if let Ok(_) = POOL.get_file_handle(name) {
+        *res_out = 1;
+    } else {
+        *res_out = 0;
+    }
+
+    console_log!("opfs_vfs_access {} ret={}", name, *res_out);
+
+    SQLITE_OK
 }
 
 unsafe extern "C" fn opfs_vfs_fullpathname(
@@ -760,14 +767,23 @@ pub fn dummy_create() -> Result<(), JsValue> {
     unsafe {
         let filename = CString::new("test.db").unwrap();
         let mut db = ptr::null_mut();
+        let mut stmt = ptr::null_mut();
+
         let ret = sqlite3_open_v2(
             filename.as_ptr(),
             &mut db,
             SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
             ptr::null_mut(),
         );
-        console_log!("=> open db {}", ret);
+        console_log!("=> open db ret {}", ret);
         console_log!("=> db {:?}", db);
+
+        let sql = CString::new(
+            "CREATE TABLE IF NOT EXISTS test (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+        )
+        .unwrap();
+        let ret = sqlite3_prepare_v2(db, sql.as_ptr(), -1, &mut stmt, ptr::null_mut());
+        console_log!("=> prepare ret {}", ret);
 
         let ret = sqlite3_close_v2(db);
         console_log!("=> close db {}", ret);
