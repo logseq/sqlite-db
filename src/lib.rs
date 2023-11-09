@@ -2,7 +2,7 @@ use core::slice;
 use std::{
     collections::HashMap,
     ffi::{c_char, c_int, c_void, CStr, CString},
-    ptr,
+    mem, ptr,
     sync::RwLock,
     time::SystemTime,
 };
@@ -155,9 +155,9 @@ impl Pool {
         Ok(size as _)
     }
 
-    pub fn truncate(&self, handle: &FileHandle, new_size: u32) -> Result<(), JsValue> {
+    pub fn truncate(&self, handle: &FileHandle, new_size: u64) -> Result<(), JsValue> {
         let handle = self.get_file_handle(&handle.fname)?;
-        handle.truncate_with_u32(new_size)?;
+        handle.truncate_with_f64(new_size as f64)?;
         Ok(())
     }
 
@@ -386,13 +386,18 @@ pub async fn init() -> Result<(), JsValue> {
 const SECTOR_SIZE: u32 = 4096;
 unsafe extern "C" fn x_close(fobj: *mut sqlite3_file) -> c_int {
     let file = &mut *(fobj as *mut FileHandle);
-    POOL.flush(file).unwrap();
 
     if file.flags & SQLITE_OPEN_DELETEONCLOSE != 0 {
         POOL.delete(&file.fname).unwrap();
 
         console_log!("delete file {}", file.fname);
+    } else {
+        POOL.flush(file).unwrap();
     }
+
+    let name = mem::take(&mut file.fname);
+    drop(name);
+    sqlite3_free(fobj as *mut c_void);
 
     SQLITE_OK
 }
@@ -807,8 +812,9 @@ pub fn rusqlite_test() -> Result<(), JsValue> {
         params![],
     )
     .unwrap();
+
     let me = Person {
-        id: 0,
+        id: 1,
         name: "Steven".to_string(),
         data: None,
     };
