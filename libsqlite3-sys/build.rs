@@ -265,7 +265,7 @@ mod build_bundled {
             }
 
             cfg.flag("-DSQLITE_OS_OTHER")
-                .flag("-DSQLITE_TEMP_STORE=3")
+             //   .flag("-DSQLITE_TEMP_STORE=3")
                 // https://github.com/rust-lang/rust/issues/74393
                 .flag("-DLONGDOUBLE_TYPE=double")
                 .flag("-DSQLITE_OMIT_LOCALTIME");

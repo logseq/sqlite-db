@@ -29,7 +29,7 @@ async fn library_init() {
 
     //    assert_eq!(x, "".to_string());
 
-      logseq_sqlite::dummy_create().unwrap();
-    //logseq_sqlite::rusqlite_test().unwrap();
+    // logseq_sqlite::dummy_create().unwrap();
+    logseq_sqlite::rusqlite_test().unwrap();
     logseq_sqlite::log("all done");
 }

@@ -22,6 +22,7 @@ use web_sys::{
 pub mod vfs;
 
 const METADATA_FILENAME: &str = "metadata.bincode";
+const EMPTY_FILES: usize = 5;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GlobalMetadata {
@@ -54,22 +55,27 @@ pub struct FileHandle {
 
 /// The pool
 struct Pool {
+    meta_handle: Option<FileSystemSyncAccessHandle>,
     metadata: RwLock<GlobalMetadata>,
     handle_pool: RwLock<HashMap<String, FileSystemSyncAccessHandle>>,
-    sqlite_files: RwLock<HashMap<String, FileHandle>>,
 }
 
 static mut POOL: Lazy<Pool> = Lazy::new(|| Pool {
+    meta_handle: None,
     metadata: RwLock::new(GlobalMetadata {
         version: 1,
         empty_files: Vec::new(),
         files: HashMap::new(),
     }),
     handle_pool: RwLock::new(HashMap::new()),
-    sqlite_files: RwLock::new(HashMap::new()),
 });
 
 impl Pool {
+    pub fn has_file(&self, path: &str) -> bool {
+        let meta = self.metadata.read().unwrap();
+        meta.files.contains_key(path)
+    }
+
     fn get_file_handle(&self, path: &str) -> Result<FileSystemSyncAccessHandle, JsValue> {
         let meta = self.metadata.read().unwrap();
         if let Some(mapped_path) = meta.files.get(path) {
@@ -103,10 +109,9 @@ impl Pool {
     }
 
     pub fn persist_metadata(&self) -> Result<(), JsValue> {
-        let pool = self.handle_pool.read().unwrap();
-        let handle = pool.get(METADATA_FILENAME).unwrap();
+        let handle = self.meta_handle()?;
 
-        console_log!("persist metadata");
+        // console_log!("persist metadata: {:#?}", &*self.metadata.read().unwrap());
 
         let raw = bincode::serialize(&*self.metadata.read().unwrap()).unwrap();
 
@@ -121,23 +126,27 @@ impl Pool {
         Ok(())
     }
 
-    pub fn read(&self, handle: &FileHandle, buf: &mut [u8], offset: u32) -> Result<u32, JsValue> {
+    pub fn read(&self, handle: &FileHandle, buf: &mut [u8], offset: i64) -> Result<u64, JsValue> {
         let mut opts = FileSystemReadWriteOptions::default();
-        Reflect::set(&mut opts, &"at".into(), &(offset as u32).into())?;
+        Reflect::set(&mut opts, &"at".into(), &(offset as f64).into())?;
 
         let handle = self.get_file_handle(&handle.fname)?;
-        let n = handle.read_with_u8_array_and_options(buf, &opts)?;
+        let n = handle.read_with_u8_array_and_options(buf, &opts)? as u64;
 
-        Ok(n as u32)
+        Ok(n)
     }
 
-    pub fn write(&self, handle: &FileHandle, buf: &[u8], offset: u32) -> Result<(), JsValue> {
+    pub fn write(&self, handle: &FileHandle, buf: &[u8], offset: i64) -> Result<(), JsValue> {
         let mut opts = FileSystemReadWriteOptions::default();
-        Reflect::set(&mut opts, &"at".into(), &(offset as u32).into())?;
+        Reflect::set(&mut opts, &"at".into(), &(offset as f64).into())?;
 
         let handle = self.get_file_handle(&handle.fname)?;
+        let nwritten = handle.write_with_u8_array_and_options(buf, &opts)?;
+        //        handle.flush()?;
 
-        handle.write_with_u8_array_and_options(buf, &opts)?;
+        assert_eq!(nwritten, buf.len() as f64);
+
+        console_log!("new size {}", handle.get_size().unwrap());
 
         Ok(())
     }
@@ -151,11 +160,11 @@ impl Pool {
     pub fn file_size(&self, path: &str) -> Result<u64, JsValue> {
         let handle = self.get_file_handle(path)?;
         let size = handle.get_size()?;
-        console_log!("[POOL] file_size {} {}", path, size);
+        console_log!("{:?}  size={}", path, size);
         Ok(size as _)
     }
 
-    pub fn truncate(&self, handle: &FileHandle, new_size: u64) -> Result<(), JsValue> {
+    pub fn truncate(&self, handle: &FileHandle, new_size: i64) -> Result<(), JsValue> {
         let handle = self.get_file_handle(&handle.fname)?;
         handle.truncate_with_f64(new_size as f64)?;
         Ok(())
@@ -217,8 +226,16 @@ impl Pool {
         Ok(())
     }
 
+    fn meta_handle(&self) -> Result<&FileSystemSyncAccessHandle, JsValue> {
+        if let Some(handle) = &self.meta_handle {
+            Ok(handle)
+        } else {
+            Err(JsValue::from_str("no meta handle"))
+        }
+    }
+
     // load from metadata.json
-    pub async fn init(&self) -> Result<(), JsValue> {
+    pub async fn init(&mut self) -> Result<(), JsValue> {
         let global_this = js_sys::global().dyn_into::<web_sys::WorkerGlobalScope>()?;
         let navigator = global_this.navigator();
 
@@ -228,7 +245,11 @@ impl Pool {
                 .into();
 
         let metadata_file = get_file_handle_from_root(&opfs_root, METADATA_FILENAME).await?;
-        let mut metadata = if metadata_file.get_size()? as u64 == 0 {
+        // save handle
+        self.meta_handle = Some(metadata_file);
+
+        let meta_size = self.meta_handle()?.get_size()? as usize;
+        let mut metadata = if meta_size == 0 {
             // create new metadata
             GlobalMetadata {
                 version: 1,
@@ -236,9 +257,8 @@ impl Pool {
                 files: HashMap::new(),
             }
         } else {
-            let size = metadata_file.get_size()?;
-            let mut buf = vec![0; size as usize];
-            let _nread = metadata_file.read_with_u8_array(&mut buf[..])?;
+            let mut buf = vec![0; meta_size];
+            let _nread = self.meta_handle()?.read_with_u8_array(&mut buf[..])?;
             let metadata = bincode::deserialize(&buf).unwrap();
 
             metadata
@@ -246,17 +266,11 @@ impl Pool {
 
         console_log!("loading init metadata: {:#?}", metadata);
 
-        // initial persist
-        {
-            let mut pool = self.handle_pool.write().unwrap();
-            pool.insert(METADATA_FILENAME.to_string(), metadata_file);
-        }
-
         let entries = list_all_raw_files(&opfs_root).await?;
         for (path, handle) in entries {
-            if !metadata.empty_files.contains(&path) && !metadata.files.contains_key(&path) {
-                metadata.empty_files.push(path.clone());
-            }
+            //if !metadata.empty_files.contains(&path) && !metadata.files.contains_key(&path) {
+            //    metadata.empty_files.push(path.clone());
+            // }
 
             let mut pool = self.handle_pool.write().unwrap();
             pool.insert(path.clone(), handle);
@@ -264,12 +278,11 @@ impl Pool {
 
         *self.metadata.write().unwrap() = metadata;
 
-        self.persist_metadata()?;
-
         // create more empty files
-        if self.metadata.read().unwrap().empty_files.len() < 20 {
-            self.init_empty_files(&opfs_root, 10).await?;
+        if self.metadata.read().unwrap().empty_files.len() < EMPTY_FILES {
+            self.init_empty_files(&opfs_root, EMPTY_FILES).await?;
         }
+        self.persist_metadata()?;
 
         Ok(())
     }
@@ -282,12 +295,26 @@ extern "C" {
 }
 
 #[macro_export]
+macro_rules! function {
+    () => {{
+        fn f() {}
+        fn type_name_of<T>(_: T) -> &'static str {
+            std::any::type_name::<T>()
+        }
+        let name = type_name_of(f);
+
+        // Find and cut the rest of the path
+        match &name[..name.len() - 3].rfind(':') {
+            Some(pos) => &name[pos + 1..name.len() - 3],
+            None => &name[..name.len() - 3],
+        }
+    }};
+}
+
+#[macro_export]
 macro_rules! console_log {
-    () => {
-        log("");
-    };
     ($($arg:tt)*) => {{
-        self::log(&std::format!($($arg)*));
+        self::log(&std::format!("{}:{} {} : {}", file!(), line!(), function!(), std::format!($($arg)*)));
     }};
 }
 
@@ -387,12 +414,12 @@ const SECTOR_SIZE: u32 = 4096;
 unsafe extern "C" fn x_close(fobj: *mut sqlite3_file) -> c_int {
     let file = &mut *(fobj as *mut FileHandle);
 
+    POOL.flush(file).unwrap();
+
     if file.flags & SQLITE_OPEN_DELETEONCLOSE != 0 {
         POOL.delete(&file.fname).unwrap();
 
         console_log!("delete file {}", file.fname);
-    } else {
-        POOL.flush(file).unwrap();
     }
 
     let name = mem::take(&mut file.fname);
@@ -409,20 +436,19 @@ unsafe extern "C" fn x_read(
 ) -> c_int {
     let file: *mut FileHandle = arg1 as _;
 
-    console_log!(
-        "xRead {:?} size={} offset={}",
-        (*file).fname,
-        amount,
-        offset
-    );
+    console_log!("{:?} {} @ {}", (*file).fname, amount, offset);
 
     let buf = slice::from_raw_parts_mut(arg2 as *mut u8, amount as usize);
-    let nread = POOL.read(&*file, buf, offset as _).unwrap() as c_int;
+    let nread = POOL.read(&*file, buf, offset).unwrap() as c_int;
 
     if nread < amount {
         // fill remain with zero0
         buf[nread as usize..].fill(0);
-        console_log!("fill zero");
+        console_log!(
+            "fill zero, no enough, required={}, actual={}",
+            amount,
+            nread
+        );
         return SQLITE_IOERR_SHORT_READ;
     }
 
@@ -431,54 +457,54 @@ unsafe extern "C" fn x_read(
 unsafe extern "C" fn x_write(
     arg1: *mut sqlite3_file,
     arg2: *const c_void,
-    iAmt: c_int,
-    iOfst: sqlite3_int64,
+    amount: c_int,
+    offset: sqlite3_int64,
 ) -> c_int {
     let file: *mut FileHandle = arg1 as _;
 
-    console_log!("xWrite {:?} size={} offset={}", (*file).fname, iAmt, iOfst);
+    console_log!(
+        "xWrite {:?} size={} offset={}",
+        (*file).fname,
+        amount,
+        offset
+    );
 
-    let buf = slice::from_raw_parts(arg2 as *const u8, iAmt as usize);
-    POOL.write(&*file, buf, iOfst as _).unwrap();
+    let buf = slice::from_raw_parts(arg2 as *const u8, amount as usize);
+    POOL.write(&*file, buf, offset as _).unwrap();
 
     SQLITE_OK
 }
 unsafe extern "C" fn x_truncate(arg1: *mut sqlite3_file, size: sqlite3_int64) -> c_int {
-    console_log!("xTruncate: {}", size);
-
     let file: *mut FileHandle = arg1 as _;
     POOL.truncate(&*file, size as _).unwrap();
+    console_log!("truncate {} to {}", (*file).fname, size);
 
     SQLITE_OK
 }
-unsafe extern "C" fn x_sync(arg1: *mut sqlite3_file, flags: c_int) -> c_int {
-    console_log!("xSync: {}", flags);
-
+unsafe extern "C" fn x_sync(arg1: *mut sqlite3_file, _flags: c_int) -> c_int {
     let file: *mut FileHandle = arg1 as _;
+
+    console_log!("syncing {}", (*file).fname);
     POOL.flush(&*file).unwrap();
 
     SQLITE_OK
 }
-unsafe extern "C" fn x_file_size(arg1: *mut sqlite3_file, pSize: *mut sqlite3_int64) -> c_int {
+unsafe extern "C" fn x_file_size(arg1: *mut sqlite3_file, res_size: *mut sqlite3_int64) -> c_int {
     let file: *mut FileHandle = arg1 as _;
 
-    *pSize = POOL.file_size(&(*file).fname).unwrap() as _;
+    *res_size = POOL.file_size(&(*file).fname).unwrap() as _;
 
     SQLITE_OK
 }
 
 // lock & unlock related
 unsafe extern "C" fn x_lock(arg1: *mut sqlite3_file, lock_type: c_int) -> c_int {
-    console_log!("xLock {}", lock_type);
-
     let file: *mut FileHandle = arg1 as _;
     (*file).lock = lock_type;
 
     SQLITE_OK
 }
 unsafe extern "C" fn x_unlock(arg1: *mut sqlite3_file, lock_type: c_int) -> c_int {
-    console_log!("xUnlock {}", lock_type);
-
     let file: *mut FileHandle = arg1 as _;
     (*file).lock = lock_type;
 
@@ -486,18 +512,18 @@ unsafe extern "C" fn x_unlock(arg1: *mut sqlite3_file, lock_type: c_int) -> c_in
 }
 unsafe extern "C" fn x_check_reserved_lock(_: *mut sqlite3_file, res_out: *mut c_int) -> c_int {
     console_log!("TODO: check reserved lock");
-    *res_out = 0;
+    *res_out = 1;
     SQLITE_OK
 }
 
 extern "C" fn x_sector_size(arg1: *mut sqlite3_file) -> c_int {
     SECTOR_SIZE as i32
 }
-extern "C" fn x_file_control(arg1: *mut sqlite3_file, op: c_int, arg: *mut c_void) -> c_int {
+extern "C" fn x_file_control(_: *mut sqlite3_file, op: c_int, arg: *mut c_void) -> c_int {
     SQLITE_NOTFOUND
 }
-extern "C" fn x_device_characteristics(arg1: *mut sqlite3_file) -> c_int {
-    SQLITE_IOCAP_UNDELETABLE_WHEN_OPEN
+extern "C" fn x_device_characteristics(_: *mut sqlite3_file) -> c_int {
+    SQLITE_IOCAP_UNDELETABLE_WHEN_OPEN | SQLITE_IOCAP_SAFE_APPEND
 }
 
 static IO_METHODS: sqlite3_io_methods = sqlite3_io_methods {
@@ -539,20 +565,22 @@ pub unsafe extern "C" fn opfs_vfs_open(
     let name = CStr::from_ptr(fname).to_str().unwrap();
 
     let file = fobj as *mut FileHandle;
-    (*file)._super.pMethods = &IO_METHODS;
 
     if SQLITE_OPEN_CREATE & flags == SQLITE_OPEN_CREATE {
         console_log!("opfs_vfs_open create file: {}", name);
 
         let handle = POOL.get_or_create_file(name).unwrap();
         (*file).fname = name.to_string();
+        (*file).lock = SQLITE_LOCK_NONE;
     } else {
         console_log!("opfs_vfs_open open file: {}", name);
 
         let handle = POOL.get_file_handle(name).unwrap();
         (*file).fname = name.to_string();
+        (*file).lock = SQLITE_LOCK_NONE;
     }
     (*file).flags = flags; // save open flags
+    (*file)._super.pMethods = &IO_METHODS;
 
     *out_flags = flags;
 
@@ -564,7 +592,7 @@ unsafe extern "C" fn opfs_vfs_delete(
     _sync_dir: c_int,
 ) -> c_int {
     let name = CStr::from_ptr(fname).to_str().unwrap();
-    console_log!("opfs_vfs_delete name => {}", name);
+    console_log!("xDelete {:?}", name);
 
     POOL.delete(name).unwrap();
 
@@ -583,16 +611,16 @@ unsafe extern "C" fn opfs_vfs_access(
 ) -> c_int {
     let name = CStr::from_ptr(fname).to_str().unwrap();
 
-    let exists = POOL.get_file_handle(name).is_ok();
+    let exists = POOL.has_file(name);
     *res_out = if exists { 1 } else { 0 };
     console_log!("xAccess(exists) {:?} ret={}", name, *res_out);
     SQLITE_OK
 }
 
 unsafe extern "C" fn opfs_vfs_fullpathname(
-    arg1: *mut sqlite3_vfs,
+    _: *mut sqlite3_vfs,
     zName: *const c_char,
-    nOut: c_int,
+    out: c_int,
     zOut: *mut c_char,
 ) -> c_int {
     let name = CStr::from_ptr(zName).to_str().unwrap();
@@ -600,36 +628,36 @@ unsafe extern "C" fn opfs_vfs_fullpathname(
     console_log!("xFullpathname: {:?}", name);
 
     let n = name.len();
-    if n > nOut as usize {
+    if n > out as usize {
         return SQLITE_CANTOPEN;
     }
 
     ptr::copy_nonoverlapping(zName, zOut, name.len() + 1);
+    zOut.offset(out as isize).write(0);
 
     SQLITE_OK
 }
 
-unsafe extern "C" fn opfs_vfs_randomness(
-    arg1: *mut sqlite3_vfs,
-    nByte: c_int,
-    zOut: *mut c_char,
-) -> c_int {
-    console_log!("opfs_vfs_randomness");
+unsafe extern "C" fn opfs_vfs_randomness(_: *mut sqlite3_vfs, n: c_int, out: *mut c_char) -> c_int {
+    console_log!("xRandomness: {} bytes", n);
 
-    let buf = slice::from_raw_parts_mut(zOut as *mut u8, nByte as usize);
+    let buf = slice::from_raw_parts_mut(out as *mut u8, n as usize);
 
     getrandom::getrandom(buf).unwrap();
 
     SQLITE_OK
 }
 
-unsafe extern "C" fn opfs_vfs_sleep(arg1: *mut sqlite3_vfs, microseconds: c_int) -> c_int {
-    console_log!("opfs_vfs_sleep");
+unsafe extern "C" fn opfs_vfs_sleep(_: *mut sqlite3_vfs, microseconds: c_int) -> c_int {
+    console_log!("sleep {} microseconds", microseconds);
+
+    let duration = std::time::Duration::from_micros(microseconds as u64);
+    std::thread::sleep(duration);
 
     SQLITE_OK
 }
 
-unsafe extern "C" fn opfs_vfs_currenttime(arg1: *mut sqlite3_vfs, arg2: *mut f64) -> c_int {
+unsafe extern "C" fn opfs_vfs_currenttime(_: *mut sqlite3_vfs, arg2: *mut f64) -> c_int {
     console_log!("opfs_vfs_currenttime");
 
     let t = SystemTime::now()
@@ -638,6 +666,22 @@ unsafe extern "C" fn opfs_vfs_currenttime(arg1: *mut sqlite3_vfs, arg2: *mut f64
         .as_secs_f64();
 
     *arg2 = t;
+
+    SQLITE_OK
+}
+
+unsafe extern "C" fn opfs_vfs_currenttime_i64(
+    _: *mut sqlite3_vfs,
+    arg2: *mut sqlite3_int64,
+) -> c_int {
+    console_log!("opfs_vfs_currenttime_i64");
+
+    let t = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    *arg2 = t as _;
 
     SQLITE_OK
 }
@@ -680,6 +724,10 @@ pub fn init_sqlite() -> Result<(), JsValue> {
         xNextSystemCall: None,
     };
 
+    // unsafe {
+    //     sqlite3_config(SQLITE_CONFIG_LOG, Some(rust_puts));
+    //}
+
     unsafe {
         sqlite3_vfs_register(Box::leak(Box::new(vfs)), 1);
     }
@@ -691,21 +739,6 @@ pub fn init_sqlite() -> Result<(), JsValue> {
 pub fn get_version() -> String {
     let version = unsafe { CStr::from_ptr(sqlite3_libversion()) };
     version.to_str().unwrap().to_string()
-}
-
-pub fn add(left: usize, right: usize) -> usize {
-    left + right
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
 }
 
 #[wasm_bindgen]
@@ -846,29 +879,50 @@ pub fn dummy_create() -> Result<(), JsValue> {
     unsafe {
         let filename = CString::new("test.db").unwrap();
         let mut db = ptr::null_mut();
-        let mut stmt = ptr::null_mut();
+        // let mut stmt = ptr::null_mut();
 
         let ret = sqlite3_open_v2(
             filename.as_ptr(),
             &mut db,
-            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_SHAREDCACHE,
             ptr::null_mut(),
         );
-        console_log!("=> open db ret {}", ret);
-        console_log!("=> db {:?}", db);
+        console_log!("=> open db ret {} db={:p}", ret, db);
 
-        let sql = CString::new(
-            "CREATE TABLE IF NOT EXISTS test (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
-        )
-        .unwrap();
-        let ret = sqlite3_prepare_v2(db, sql.as_ptr(), -1, &mut stmt, ptr::null_mut());
-        console_log!("=> prepare ret {}", ret);
+        // IF NOT EXISTS
+        let sql = b"CREATE TABLE IF NOT EXISTS demo (id INTEGER, name TEXT)\0";
 
+        /* // exec
+        let mut err_msg = ptr::null_mut();
+        extern "C" fn callback(
+            _context: *mut c_void,
+            ncols: c_int,
+            cols: *mut *mut c_char,
+            col_names: *mut *mut c_char,
+        ) -> c_int {
+            console_log!("callback: ncols={}", ncols);
+            0
+        }
+        let rc = sqlite3_exec(db, sql.as_ptr(), Some(callback), ptr::null_mut(), &mut err_msg);
+        let err_msg = CStr::from_ptr(err_msg).to_str();
+
+        console_log!("=> exec ret {} err_msg={:?}", rc, err_msg);
+        */
+
+        let mut stmt = ptr::null_mut();
+        let rc = sqlite3_prepare_v2(db, sql.as_ptr() as *const _, -1, &mut stmt, ptr::null_mut());
+        assert_eq!(rc, SQLITE_OK);
+
+        console_log!("================================== => begin step - create table");
         let ret = sqlite3_step(stmt);
-        if ret == SQLITE_DONE {
+        if ret == SQLITE_DONE || ret == SQLITE_OK {
             console_log!("=> step done");
         } else {
-            console_log!("=> step ret {}", ret);
+            console_log!("====== => step ret {}", ret);
+            let s = sqlite3_errmsg(db);
+            let s = CStr::from_ptr(s).to_str().unwrap();
+            console_log!("ERROR: {}", s);
+            panic!();
         }
 
         let ret = sqlite3_finalize(stmt);
@@ -877,16 +931,22 @@ pub fn dummy_create() -> Result<(), JsValue> {
         console_log!("=======================================================");
 
         let mut stmt = ptr::null_mut();
-        let sql = CString::new("INSERT INTO test (name) VALUES ('hello world')").unwrap();
+        let sql = CString::new("INSERT INTO demo (name) VALUES ('hello world')").unwrap();
         let ret = sqlite3_prepare_v2(db, sql.as_ptr(), -1, &mut stmt, ptr::null_mut());
         console_log!("=> prepare ret {}", ret);
-
+        if ret != SQLITE_OK {
+            console_log!("=> step ret {}", ret);
+            let s = sqlite3_errmsg(db);
+            let s = CStr::from_ptr(s).to_str().unwrap();
+            console_log!("ERROR: {}", s);
+            panic!();
+        }
         let ret = sqlite3_step(stmt);
         if ret != SQLITE_OK {
             console_log!("=> step ret {}", ret);
             let s = sqlite3_errmsg(db);
             let s = CStr::from_ptr(s).to_str().unwrap();
-            console_log!("ERROR: err {}", s);
+            console_log!("ERROR: {}", s);
             panic!();
         }
 
