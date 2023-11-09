@@ -823,6 +823,7 @@ pub fn rusqlite_test() -> Result<(), JsValue> {
         params![me.name, me.data],
     )
     .unwrap();
+
     let mut stmt = conn.prepare("SELECT id, name, data FROM person").unwrap();
     let person_iter = stmt
         .query_map(params![], |row| {
@@ -883,6 +884,9 @@ pub fn dummy_create() -> Result<(), JsValue> {
         let ret = sqlite3_step(stmt);
         if ret != SQLITE_OK {
             console_log!("=> step ret {}", ret);
+            let s = sqlite3_errmsg(db);
+            let s = CStr::from_ptr(s).to_str().unwrap();
+            console_log!("ERROR: err {}", s);
             panic!();
         }
 
