@@ -18,7 +18,7 @@ use web_sys::{
     FileSystemReadWriteOptions, FileSystemSyncAccessHandle,
 };
 
-pub mod vfs;
+pub mod sqlite_opfs;
 
 const METADATA_FILENAME: &str = "metadata.bincode";
 const EMPTY_FILES: usize = 5;
@@ -86,6 +86,21 @@ impl Pool {
         }
     }
 
+    // Helper, avoid clone of FileSystemSyncAccessHandle
+    fn with_file_handle<F, T>(&self, path: &str, f: F) -> Result<T, JsValue>
+    where
+        F: FnOnce(&FileSystemSyncAccessHandle) -> Result<T, JsValue>,
+    {
+        let meta = self.metadata.read().unwrap();
+        if let Some(mapped_path) = meta.files.get(path) {
+            let pool = self.handle_pool.read().unwrap();
+            let handle = pool.get(&*mapped_path).unwrap();
+            return f(handle);
+        } else {
+            return Err(JsValue::from_str("file not found"));
+        }
+    }
+
     fn get_or_create_file(&self, path: &str) -> Result<FileSystemSyncAccessHandle, JsValue> {
         if let Ok(handle) = self.get_file_handle(path) {
             return Ok(handle);
@@ -123,43 +138,42 @@ impl Pool {
         Ok(())
     }
 
-    pub fn read(&self, handle: &FileHandle, buf: &mut [u8], offset: i64) -> Result<u64, JsValue> {
+    pub fn read(&self, handle: &FileHandle, buf: &mut [u8], offset: i64) -> Result<i64, JsValue> {
         let mut opts = FileSystemReadWriteOptions::default();
         Reflect::set(&mut opts, &"at".into(), &(offset as f64).into())?;
 
-        let handle = self.get_file_handle(&handle.fname)?;
-        let n = handle.read_with_u8_array_and_options(buf, &opts)? as u64;
+        //let handle = self.get_file_handle(&handle.fname)?;
+        //let n = handle.read_with_u8_array_and_options(buf, &opts)? as u64;
+        let n = self.with_file_handle(&handle.fname, |h| {
+            h.read_with_u8_array_and_options(buf, &opts)
+        })?;
 
-        Ok(n)
+        Ok(n as i64)
     }
 
     pub fn write(&self, handle: &FileHandle, buf: &[u8], offset: i64) -> Result<(), JsValue> {
         let mut opts = FileSystemReadWriteOptions::default();
         Reflect::set(&mut opts, &"at".into(), &(offset as f64).into())?;
 
-        let handle = self.get_file_handle(&handle.fname)?;
-        let nwritten = handle.write_with_u8_array_and_options(buf, &opts)?;
+        let nwritten = self.with_file_handle(&handle.fname, |h| {
+            h.write_with_u8_array_and_options(buf, &opts)
+        })?;
         assert_eq!(nwritten, buf.len() as f64);
         Ok(())
     }
 
     pub fn flush(&self, handle: &FileHandle) -> Result<(), JsValue> {
-        let handle = self.get_file_handle(&handle.fname)?;
-        handle.flush()?;
-        Ok(())
+        self.with_file_handle(&handle.fname, |h| h.flush())
     }
 
     pub fn file_size(&self, path: &str) -> Result<u64, JsValue> {
-        let handle = self.get_file_handle(path)?;
-        let size = handle.get_size()?;
+        let size = self.with_file_handle(path, |h| h.get_size())?;
 
         Ok(size as _)
     }
 
     pub fn truncate(&self, handle: &FileHandle, new_size: u64) -> Result<(), JsValue> {
-        let handle = self.get_file_handle(&handle.fname)?;
-        handle.truncate_with_f64(new_size as f64)?;
-        Ok(())
+        self.with_file_handle(&handle.fname, |h| h.truncate_with_u32(new_size as _))
     }
 
     pub fn delete(&self, path: &str) -> Result<(), JsValue> {
@@ -430,7 +444,7 @@ mod io_methods {
         let buf = slice::from_raw_parts_mut(arg2 as *mut u8, amount as usize);
         match POOL.read(&*file, buf, offset) {
             Ok(nread) => {
-                if nread < amount as u64 {
+                if (nread as i32) < amount {
                     buf[nread as usize..].fill(0); // fill with 0
                     return SQLITE_IOERR_SHORT_READ;
                 }
@@ -722,8 +736,7 @@ pub fn get_version() -> String {
     version.to_str().unwrap().to_string()
 }
 
-#[wasm_bindgen]
-pub fn set_panic_hook() {
+fn set_panic_hook() {
     // When the `console_error_panic_hook` feature is enabled, we can call the
     // `set_panic_hook` function at least once during initialization, and then
     // we will get better error messages if our code ever panics.
@@ -806,6 +819,14 @@ pub fn has_opfs_support() -> bool {
     true
 }
 
+
+
+
+
+
+
+
+
 pub fn rusqlite_test() -> Result<(), JsValue> {
     use rusqlite::{params, Connection};
 
@@ -834,7 +855,7 @@ pub fn rusqlite_test() -> Result<(), JsValue> {
     };
 
     let start = js_sys::Date::now();
-    for _ in 0..100 {
+    for _ in 0..500 {
         conn.execute(
             "INSERT INTO person (name, data) VALUES (?1, ?2)",
             params![me.name, me.data],
@@ -842,7 +863,7 @@ pub fn rusqlite_test() -> Result<(), JsValue> {
         .unwrap();
     }
     let elapsed = js_sys::Date::now() - start;
-    console_log!("insert 1000 rows: {:?}", elapsed);
+    console_log!("insert 500 rows: {:?}ms", elapsed);
 
     /*let mut stmt = conn.prepare("SELECT id, name, data FROM person").unwrap();
     let person_iter = stmt
