@@ -410,136 +410,145 @@ pub async fn init() -> Result<(), JsValue> {
 }
 
 // sqlite part
-const SECTOR_SIZE: u32 = 4096;
-unsafe extern "C" fn x_close(fobj: *mut sqlite3_file) -> c_int {
-    let file = &mut *(fobj as *mut FileHandle);
+mod io_methods {
+    use super::*;
+    const SECTOR_SIZE: u32 = 4096;
 
-    POOL.flush(file).unwrap();
+    pub unsafe extern "C" fn close(fobj: *mut sqlite3_file) -> c_int {
+        let file = &mut *(fobj as *mut FileHandle);
 
-    if file.flags & SQLITE_OPEN_DELETEONCLOSE != 0 {
-        POOL.delete(&file.fname).unwrap();
+        POOL.flush(file).unwrap();
 
-        console_log!("delete file {}", file.fname);
+        if file.flags & SQLITE_OPEN_DELETEONCLOSE != 0 {
+            POOL.delete(&file.fname).unwrap();
+
+            console_log!("delete file {}", file.fname);
+        }
+
+        let name = mem::take(&mut file.fname);
+        drop(name);
+        sqlite3_free(fobj as *mut c_void);
+
+        SQLITE_OK
     }
+    pub unsafe extern "C" fn read(
+        arg1: *mut sqlite3_file,
+        arg2: *mut c_void,
+        amount: c_int,
+        offset: sqlite3_int64,
+    ) -> c_int {
+        let file: *mut FileHandle = arg1 as _;
 
-    let name = mem::take(&mut file.fname);
-    drop(name);
-    sqlite3_free(fobj as *mut c_void);
+        console_log!("{:?} {} @ {}", (*file).fname, amount, offset);
 
-    SQLITE_OK
-}
-unsafe extern "C" fn x_read(
-    arg1: *mut sqlite3_file,
-    arg2: *mut c_void,
-    amount: c_int,
-    offset: sqlite3_int64,
-) -> c_int {
-    let file: *mut FileHandle = arg1 as _;
+        let buf = slice::from_raw_parts_mut(arg2 as *mut u8, amount as usize);
+        let nread = POOL.read(&*file, buf, offset).unwrap() as c_int;
 
-    console_log!("{:?} {} @ {}", (*file).fname, amount, offset);
+        if nread < amount {
+            // fill remain with zero0
+            buf[nread as usize..].fill(0);
+            console_log!(
+                "fill zero, no enough, required={}, actual={}",
+                amount,
+                nread
+            );
+            return SQLITE_IOERR_SHORT_READ;
+        }
 
-    let buf = slice::from_raw_parts_mut(arg2 as *mut u8, amount as usize);
-    let nread = POOL.read(&*file, buf, offset).unwrap() as c_int;
+        SQLITE_OK
+    }
+    pub unsafe extern "C" fn write(
+        arg1: *mut sqlite3_file,
+        arg2: *const c_void,
+        amount: c_int,
+        offset: sqlite3_int64,
+    ) -> c_int {
+        let file: *mut FileHandle = arg1 as _;
 
-    if nread < amount {
-        // fill remain with zero0
-        buf[nread as usize..].fill(0);
         console_log!(
-            "fill zero, no enough, required={}, actual={}",
+            "xWrite {:?} size={} offset={}",
+            (*file).fname,
             amount,
-            nread
+            offset
         );
-        return SQLITE_IOERR_SHORT_READ;
+
+        let buf = slice::from_raw_parts(arg2 as *const u8, amount as usize);
+        POOL.write(&*file, buf, offset as _).unwrap();
+
+        SQLITE_OK
+    }
+    pub unsafe extern "C" fn truncate(arg1: *mut sqlite3_file, size: sqlite3_int64) -> c_int {
+        let file: *mut FileHandle = arg1 as _;
+        POOL.truncate(&*file, size as _).unwrap();
+        console_log!("truncate {} to {}", (*file).fname, size);
+
+        SQLITE_OK
+    }
+    pub unsafe extern "C" fn sync(arg1: *mut sqlite3_file, _flags: c_int) -> c_int {
+        let file: *mut FileHandle = arg1 as _;
+
+        console_log!("syncing {}", (*file).fname);
+        POOL.flush(&*file).unwrap();
+
+        SQLITE_OK
+    }
+    pub unsafe extern "C" fn file_size(
+        arg1: *mut sqlite3_file,
+        res_size: *mut sqlite3_int64,
+    ) -> c_int {
+        let file: *mut FileHandle = arg1 as _;
+
+        *res_size = POOL.file_size(&(*file).fname).unwrap() as _;
+
+        SQLITE_OK
     }
 
-    SQLITE_OK
+    // lock & unlock related
+    pub unsafe extern "C" fn lock(arg1: *mut sqlite3_file, lock_type: c_int) -> c_int {
+        let file: *mut FileHandle = arg1 as _;
+        (*file).lock = lock_type;
+
+        SQLITE_OK
+    }
+    pub unsafe extern "C" fn unlock(arg1: *mut sqlite3_file, lock_type: c_int) -> c_int {
+        let file: *mut FileHandle = arg1 as _;
+        (*file).lock = lock_type;
+
+        SQLITE_OK
+    }
+    pub unsafe extern "C" fn check_reserved_lock(
+        _: *mut sqlite3_file,
+        res_out: *mut c_int,
+    ) -> c_int {
+        console_log!("TODO: check reserved lock");
+        *res_out = 1;
+        SQLITE_OK
+    }
+
+    pub extern "C" fn sector_size(_: *mut sqlite3_file) -> c_int {
+        SECTOR_SIZE as i32
+    }
+    pub extern "C" fn file_control(_: *mut sqlite3_file, op: c_int, arg: *mut c_void) -> c_int {
+        SQLITE_NOTFOUND
+    }
+    pub extern "C" fn device_characteristics(_: *mut sqlite3_file) -> c_int {
+        SQLITE_IOCAP_UNDELETABLE_WHEN_OPEN | SQLITE_IOCAP_SAFE_APPEND
+    }
 }
-unsafe extern "C" fn x_write(
-    arg1: *mut sqlite3_file,
-    arg2: *const c_void,
-    amount: c_int,
-    offset: sqlite3_int64,
-) -> c_int {
-    let file: *mut FileHandle = arg1 as _;
-
-    console_log!(
-        "xWrite {:?} size={} offset={}",
-        (*file).fname,
-        amount,
-        offset
-    );
-
-    let buf = slice::from_raw_parts(arg2 as *const u8, amount as usize);
-    POOL.write(&*file, buf, offset as _).unwrap();
-
-    SQLITE_OK
-}
-unsafe extern "C" fn x_truncate(arg1: *mut sqlite3_file, size: sqlite3_int64) -> c_int {
-    let file: *mut FileHandle = arg1 as _;
-    POOL.truncate(&*file, size as _).unwrap();
-    console_log!("truncate {} to {}", (*file).fname, size);
-
-    SQLITE_OK
-}
-unsafe extern "C" fn x_sync(arg1: *mut sqlite3_file, _flags: c_int) -> c_int {
-    let file: *mut FileHandle = arg1 as _;
-
-    console_log!("syncing {}", (*file).fname);
-    POOL.flush(&*file).unwrap();
-
-    SQLITE_OK
-}
-unsafe extern "C" fn x_file_size(arg1: *mut sqlite3_file, res_size: *mut sqlite3_int64) -> c_int {
-    let file: *mut FileHandle = arg1 as _;
-
-    *res_size = POOL.file_size(&(*file).fname).unwrap() as _;
-
-    SQLITE_OK
-}
-
-// lock & unlock related
-unsafe extern "C" fn x_lock(arg1: *mut sqlite3_file, lock_type: c_int) -> c_int {
-    let file: *mut FileHandle = arg1 as _;
-    (*file).lock = lock_type;
-
-    SQLITE_OK
-}
-unsafe extern "C" fn x_unlock(arg1: *mut sqlite3_file, lock_type: c_int) -> c_int {
-    let file: *mut FileHandle = arg1 as _;
-    (*file).lock = lock_type;
-
-    SQLITE_OK
-}
-unsafe extern "C" fn x_check_reserved_lock(_: *mut sqlite3_file, res_out: *mut c_int) -> c_int {
-    console_log!("TODO: check reserved lock");
-    *res_out = 1;
-    SQLITE_OK
-}
-
-extern "C" fn x_sector_size(arg1: *mut sqlite3_file) -> c_int {
-    SECTOR_SIZE as i32
-}
-extern "C" fn x_file_control(_: *mut sqlite3_file, op: c_int, arg: *mut c_void) -> c_int {
-    SQLITE_NOTFOUND
-}
-extern "C" fn x_device_characteristics(_: *mut sqlite3_file) -> c_int {
-    SQLITE_IOCAP_UNDELETABLE_WHEN_OPEN | SQLITE_IOCAP_SAFE_APPEND
-}
-
 static IO_METHODS: sqlite3_io_methods = sqlite3_io_methods {
     iVersion: 1,
-    xClose: Some(x_close),
-    xRead: Some(x_read),
-    xWrite: Some(x_write),
-    xTruncate: Some(x_truncate),
-    xSync: Some(x_sync),
-    xFileSize: Some(x_file_size),
-    xLock: Some(x_lock),
-    xUnlock: Some(x_unlock),
-    xCheckReservedLock: Some(x_check_reserved_lock),
-    xFileControl: Some(x_file_control),
-    xSectorSize: Some(x_sector_size),
-    xDeviceCharacteristics: Some(x_device_characteristics),
+    xClose: Some(io_methods::close),
+    xRead: Some(io_methods::read),
+    xWrite: Some(io_methods::write),
+    xTruncate: Some(io_methods::truncate),
+    xSync: Some(io_methods::sync),
+    xFileSize: Some(io_methods::file_size),
+    xLock: Some(io_methods::lock),
+    xUnlock: Some(io_methods::unlock),
+    xCheckReservedLock: Some(io_methods::check_reserved_lock),
+    xFileControl: Some(io_methods::file_control),
+    xSectorSize: Some(io_methods::sector_size),
+    xDeviceCharacteristics: Some(io_methods::device_characteristics),
     /* Methods above are valid for version 1 */
     xShmMap: None,
     xShmLock: None,
@@ -550,149 +559,136 @@ static IO_METHODS: sqlite3_io_methods = sqlite3_io_methods {
 };
 
 // - vfs layer
+mod opfs_vfs {
+    use super::*;
 
-pub unsafe extern "C" fn opfs_vfs_open(
-    _vfs: *mut sqlite3_vfs,
-    fname: *const c_char,
-    fobj: *mut sqlite3_file,
-    flags: c_int,
-    out_flags: *mut c_int,
-) -> c_int {
-    if fname.is_null() {
-        return SQLITE_IOERR;
+    pub unsafe extern "C" fn open(
+        _vfs: *mut sqlite3_vfs,
+        fname: *const c_char,
+        fobj: *mut sqlite3_file,
+        flags: c_int,
+        out_flags: *mut c_int,
+    ) -> c_int {
+        if fname.is_null() {
+            return SQLITE_IOERR;
+        }
+
+        let name = CStr::from_ptr(fname).to_str().unwrap();
+
+        let file = fobj as *mut FileHandle;
+
+        if SQLITE_OPEN_CREATE & flags == SQLITE_OPEN_CREATE {
+            console_log!("open create file: {}", name);
+
+            let handle = POOL.get_or_create_file(name).unwrap();
+            (*file).fname = name.to_string();
+            (*file).lock = SQLITE_LOCK_NONE;
+        } else {
+            console_log!("open open file: {}", name);
+
+            let handle = POOL.get_file_handle(name).unwrap();
+            (*file).fname = name.to_string();
+            (*file).lock = SQLITE_LOCK_NONE;
+        }
+        (*file).flags = flags; // save open flags
+        (*file)._super.pMethods = &IO_METHODS;
+
+        *out_flags = flags;
+
+        SQLITE_OK
+    }
+    pub unsafe extern "C" fn delete(
+        _: *mut sqlite3_vfs,
+        fname: *const c_char,
+        _sync_dir: c_int,
+    ) -> c_int {
+        let name = CStr::from_ptr(fname).to_str().unwrap();
+        console_log!("xDelete {:?}", name);
+
+        POOL.delete(name).unwrap();
+
+        SQLITE_OK
+    }
+    /// Query the file-system to see if the named file exists, is readable or
+    /// is both readable and writable.
+    /// #define SQLITE_ACCESS_EXISTS    0
+    /// #define SQLITE_ACCESS_READWRITE 1   /* Used by PRAGMA temp_store_directory */
+    /// #define SQLITE_ACCESS_READ      2   /* Unused */
+    pub unsafe extern "C" fn access(
+        _: *mut sqlite3_vfs,
+        fname: *const c_char,
+        _flags: c_int,
+        res_out: *mut c_int,
+    ) -> c_int {
+        let name = CStr::from_ptr(fname).to_str().unwrap();
+
+        let exists = POOL.has_file(name);
+        *res_out = if exists { 1 } else { 0 };
+        console_log!("xAccess(exists) {:?} ret={}", name, *res_out);
+        SQLITE_OK
     }
 
-    let name = CStr::from_ptr(fname).to_str().unwrap();
+    pub unsafe extern "C" fn fullpathname(
+        _: *mut sqlite3_vfs,
+        zName: *const c_char,
+        out: c_int,
+        zOut: *mut c_char,
+    ) -> c_int {
+        let name = CStr::from_ptr(zName).to_str().unwrap();
 
-    let file = fobj as *mut FileHandle;
+        console_log!("xFullpathname: {:?}", name);
 
-    if SQLITE_OPEN_CREATE & flags == SQLITE_OPEN_CREATE {
-        console_log!("opfs_vfs_open create file: {}", name);
+        let n = name.len();
+        if n > out as usize {
+            return SQLITE_CANTOPEN;
+        }
 
-        let handle = POOL.get_or_create_file(name).unwrap();
-        (*file).fname = name.to_string();
-        (*file).lock = SQLITE_LOCK_NONE;
-    } else {
-        console_log!("opfs_vfs_open open file: {}", name);
+        ptr::copy_nonoverlapping(zName, zOut, name.len() + 1);
+        zOut.offset(out as isize).write(0);
 
-        let handle = POOL.get_file_handle(name).unwrap();
-        (*file).fname = name.to_string();
-        (*file).lock = SQLITE_LOCK_NONE;
-    }
-    (*file).flags = flags; // save open flags
-    (*file)._super.pMethods = &IO_METHODS;
-
-    *out_flags = flags;
-
-    SQLITE_OK
-}
-unsafe extern "C" fn opfs_vfs_delete(
-    _: *mut sqlite3_vfs,
-    fname: *const c_char,
-    _sync_dir: c_int,
-) -> c_int {
-    let name = CStr::from_ptr(fname).to_str().unwrap();
-    console_log!("xDelete {:?}", name);
-
-    POOL.delete(name).unwrap();
-
-    SQLITE_ERROR
-}
-/// Query the file-system to see if the named file exists, is readable or
-/// is both readable and writable.
-/// #define SQLITE_ACCESS_EXISTS    0
-/// #define SQLITE_ACCESS_READWRITE 1   /* Used by PRAGMA temp_store_directory */
-/// #define SQLITE_ACCESS_READ      2   /* Unused */
-unsafe extern "C" fn opfs_vfs_access(
-    _: *mut sqlite3_vfs,
-    fname: *const c_char,
-    _flags: c_int,
-    res_out: *mut c_int,
-) -> c_int {
-    let name = CStr::from_ptr(fname).to_str().unwrap();
-
-    let exists = POOL.has_file(name);
-    *res_out = if exists { 1 } else { 0 };
-    console_log!("xAccess(exists) {:?} ret={}", name, *res_out);
-    SQLITE_OK
-}
-
-unsafe extern "C" fn opfs_vfs_fullpathname(
-    _: *mut sqlite3_vfs,
-    zName: *const c_char,
-    out: c_int,
-    zOut: *mut c_char,
-) -> c_int {
-    let name = CStr::from_ptr(zName).to_str().unwrap();
-
-    console_log!("xFullpathname: {:?}", name);
-
-    let n = name.len();
-    if n > out as usize {
-        return SQLITE_CANTOPEN;
+        SQLITE_OK
     }
 
-    ptr::copy_nonoverlapping(zName, zOut, name.len() + 1);
-    zOut.offset(out as isize).write(0);
+    pub unsafe extern "C" fn randomness(_: *mut sqlite3_vfs, n: c_int, out: *mut c_char) -> c_int {
+        console_log!("xRandomness: {} bytes", n);
 
-    SQLITE_OK
-}
+        let buf = slice::from_raw_parts_mut(out as *mut u8, n as usize);
 
-unsafe extern "C" fn opfs_vfs_randomness(_: *mut sqlite3_vfs, n: c_int, out: *mut c_char) -> c_int {
-    console_log!("xRandomness: {} bytes", n);
+        getrandom::getrandom(buf).unwrap();
 
-    let buf = slice::from_raw_parts_mut(out as *mut u8, n as usize);
+        SQLITE_OK
+    }
 
-    getrandom::getrandom(buf).unwrap();
+    pub unsafe extern "C" fn sleep(_: *mut sqlite3_vfs, microseconds: c_int) -> c_int {
+        console_log!("sleep {} microseconds", microseconds);
 
-    SQLITE_OK
-}
+        let duration = std::time::Duration::from_micros(microseconds as u64);
+        std::thread::sleep(duration);
 
-unsafe extern "C" fn opfs_vfs_sleep(_: *mut sqlite3_vfs, microseconds: c_int) -> c_int {
-    console_log!("sleep {} microseconds", microseconds);
+        SQLITE_OK
+    }
 
-    let duration = std::time::Duration::from_micros(microseconds as u64);
-    std::thread::sleep(duration);
+    pub unsafe extern "C" fn currenttime(_: *mut sqlite3_vfs, arg2: *mut f64) -> c_int {
+        console_log!("currenttime");
 
-    SQLITE_OK
-}
+        let t = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
 
-unsafe extern "C" fn opfs_vfs_currenttime(_: *mut sqlite3_vfs, arg2: *mut f64) -> c_int {
-    console_log!("opfs_vfs_currenttime");
+        *arg2 = t;
 
-    let t = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_secs_f64();
+        SQLITE_OK
+    }
 
-    *arg2 = t;
-
-    SQLITE_OK
-}
-
-unsafe extern "C" fn opfs_vfs_currenttime_i64(
-    _: *mut sqlite3_vfs,
-    arg2: *mut sqlite3_int64,
-) -> c_int {
-    console_log!("opfs_vfs_currenttime_i64");
-
-    let t = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-
-    *arg2 = t as _;
-
-    SQLITE_OK
-}
-
-unsafe extern "C" fn opfs_vfs_get_last_error(
-    arg1: *mut sqlite3_vfs,
-    arg2: c_int,
-    arg3: *mut c_char,
-) -> c_int {
-    unimplemented!("opfs_vfs_get_last_error");
-    SQLITE_OK
+    pub unsafe extern "C" fn get_last_error(
+        _: *mut sqlite3_vfs,
+        _len: c_int,
+        _buf: *mut c_char,
+    ) -> c_int {
+        unimplemented!("get_last_error");
+        SQLITE_OK
+    }
 }
 
 #[wasm_bindgen]
@@ -704,19 +700,19 @@ pub fn init_sqlite() -> Result<(), JsValue> {
         pNext: ptr::null_mut(),
         zName: "logseq-sahpool-opfs\0".as_ptr() as *const c_char,
         pAppData: ptr::null_mut(),
-        xOpen: Some(opfs_vfs_open),
-        xDelete: Some(opfs_vfs_delete),
-        xAccess: Some(opfs_vfs_access),
-        xFullPathname: Some(opfs_vfs_fullpathname),
+        xOpen: Some(opfs_vfs::open),
+        xDelete: Some(opfs_vfs::delete),
+        xAccess: Some(opfs_vfs::access),
+        xFullPathname: Some(opfs_vfs::fullpathname),
         // run-time extension support
         xDlOpen: None,
         xDlError: None,
         xDlSym: None,
         xDlClose: None,
-        xRandomness: Some(opfs_vfs_randomness),
-        xSleep: Some(opfs_vfs_sleep),
-        xCurrentTime: Some(opfs_vfs_currenttime),
-        xGetLastError: Some(opfs_vfs_get_last_error),
+        xRandomness: Some(opfs_vfs::randomness),
+        xSleep: Some(opfs_vfs::sleep),
+        xCurrentTime: Some(opfs_vfs::currenttime),
+        xGetLastError: Some(opfs_vfs::get_last_error),
         // The methods above are in version 1 of the sqlite_vfs object definition
         xCurrentTimeInt64: None,
         xSetSystemCall: None,
