@@ -1,7 +1,6 @@
 #![cfg(target_arch = "wasm32")]
 
 extern crate wasm_bindgen_test;
-use std::{assert, println};
 
 use logseq_sqlite::console_log;
 use wasm_bindgen_test::*;
@@ -25,9 +24,6 @@ async fn opfs_ok() {
 #[wasm_bindgen_test]
 async fn library_init() {
     logseq_sqlite::init().await.unwrap();
-    logseq_sqlite::init_sqlite().unwrap();
-
-    //    assert_eq!(x, "".to_string());
 
     // logseq_sqlite::dummy_create().unwrap();
     logseq_sqlite::rusqlite_test().unwrap();
