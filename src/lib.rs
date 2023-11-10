@@ -142,12 +142,7 @@ impl Pool {
 
         let handle = self.get_file_handle(&handle.fname)?;
         let nwritten = handle.write_with_u8_array_and_options(buf, &opts)?;
-        //        handle.flush()?;
-
         assert_eq!(nwritten, buf.len() as f64);
-
-        console_log!("new size {}", handle.get_size().unwrap());
-
         Ok(())
     }
 
@@ -249,7 +244,7 @@ impl Pool {
         self.meta_handle = Some(metadata_file);
 
         let meta_size = self.meta_handle()?.get_size()? as usize;
-        let mut metadata = if meta_size == 0 {
+        let metadata = if meta_size == 0 {
             // create new metadata
             GlobalMetadata {
                 version: 1,
@@ -447,11 +442,6 @@ mod io_methods {
         if nread < amount {
             // fill remain with zero0
             buf[nread as usize..].fill(0);
-            console_log!(
-                "fill zero, no enough, required={}, actual={}",
-                amount,
-                nread
-            );
             return SQLITE_IOERR_SHORT_READ;
         }
 
@@ -466,7 +456,7 @@ mod io_methods {
         let file: *mut FileHandle = arg1 as _;
 
         console_log!(
-            "xWrite {:?} size={} offset={}",
+            "{:?} size={} offset={}",
             (*file).fname,
             amount,
             offset
@@ -528,13 +518,14 @@ mod io_methods {
     pub extern "C" fn sector_size(_: *mut sqlite3_file) -> c_int {
         SECTOR_SIZE as i32
     }
-    pub extern "C" fn file_control(_: *mut sqlite3_file, op: c_int, arg: *mut c_void) -> c_int {
+    pub extern "C" fn file_control(_: *mut sqlite3_file, _op: c_int, _arg: *mut c_void) -> c_int {
         SQLITE_NOTFOUND
     }
     pub extern "C" fn device_characteristics(_: *mut sqlite3_file) -> c_int {
         SQLITE_IOCAP_UNDELETABLE_WHEN_OPEN | SQLITE_IOCAP_SAFE_APPEND
     }
 }
+
 static IO_METHODS: sqlite3_io_methods = sqlite3_io_methods {
     iVersion: 1,
     xClose: Some(io_methods::close),
@@ -624,7 +615,7 @@ mod opfs_vfs {
 
         let exists = POOL.has_file(name);
         *res_out = if exists { 1 } else { 0 };
-        console_log!("xAccess(exists) {:?} ret={}", name, *res_out);
+        // console_log!("xAccess(exists) {:?} ret={}", name, *res_out);
         SQLITE_OK
     }
 
@@ -650,12 +641,8 @@ mod opfs_vfs {
     }
 
     pub unsafe extern "C" fn randomness(_: *mut sqlite3_vfs, n: c_int, out: *mut c_char) -> c_int {
-        console_log!("xRandomness: {} bytes", n);
-
         let buf = slice::from_raw_parts_mut(out as *mut u8, n as usize);
-
         getrandom::getrandom(buf).unwrap();
-
         SQLITE_OK
     }
 
