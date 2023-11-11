@@ -25,7 +25,9 @@ async fn opfs_ok() {
 async fn library_init() {
     logseq_sqlite::init().await.unwrap();
 
-    // logseq_sqlite::dummy_create().unwrap();
-    logseq_sqlite::rusqlite_test().unwrap();
+    // logseq_sqlite::rusqlite_test().unwrap();
+
+    logseq_sqlite::block_db_test().unwrap();
+
     logseq_sqlite::log("all done");
 }
