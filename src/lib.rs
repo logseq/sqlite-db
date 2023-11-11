@@ -387,6 +387,14 @@ pub fn block_db_test() -> Result<(), JsValue> {
 
     console_log!("blocks: {:#?}", blocks);
 
+    delete_blocks("my-graph", vec!["2".to_string()]).unwrap();
+
+    let val = fetch_all_blocks("my-graph").unwrap();
+    let blocks: Vec<BlockInfo> = serde_wasm_bindgen::from_value(val).unwrap();
+    assert_eq!(blocks.len(), 2);
+
+    console_log!("blocks: {:#?}", blocks);
+
     Ok(())
 }
 
