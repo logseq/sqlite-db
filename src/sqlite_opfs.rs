@@ -392,6 +392,7 @@ async fn get_file_handle_from_root(
 }
 
 // sqlite part
+
 mod io_methods {
     use super::*;
     const SECTOR_SIZE: u32 = 4096;
@@ -460,12 +461,10 @@ mod io_methods {
             Ok(_) => SQLITE_OK,
             Err(_) => SQLITE_IOERR_TRUNCATE,
         }
-        // console_log!("truncate {} to {}", (*file).fname, size);
     }
     pub unsafe extern "C" fn sync(arg1: *mut sqlite3_file, _flags: c_int) -> c_int {
         let file: *mut FileHandle = arg1 as _;
 
-        // console_log!("syncing {}", (*file).fname);
         match POOL.flush(&*file) {
             Ok(_) => SQLITE_OK,
             Err(_) => SQLITE_IOERR_FSYNC,
@@ -610,7 +609,6 @@ mod opfs_vfs {
 
         let exists = POOL.has_file(name);
         *res_out = if exists { 1 } else { 0 };
-        // console_log!("xAccess(exists) {:?} ret={}", name, *res_out);
         SQLITE_OK
     }
 
@@ -649,6 +647,7 @@ mod opfs_vfs {
     }
 
     pub unsafe extern "C" fn currenttime(_: *mut sqlite3_vfs, arg2: *mut f64) -> c_int {
+        // wasm32-unknown-unknown does not provide std::time::SystemTime
         let time = js_sys::Date::new_0().get_time();
 
         let t = time / 86400000.0 + 2440587.5;
@@ -718,7 +717,7 @@ pub fn has_opfs_support() -> bool {
     let global_this = match js_sys::global().dyn_into::<web_sys::WorkerGlobalScope>() {
         Ok(v) => v,
         Err(_) => {
-            log("no WorkerGlobalScope");
+            console_log!("Not in Worker context, WorkerGlobalScope not found");
             return false;
         }
     };

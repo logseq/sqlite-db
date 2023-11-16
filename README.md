@@ -2,7 +2,7 @@
 
 Logseq's sqlite DB backend.
 
-<https://github.com/rusqlite/rusqlite/pull/1010>
+Based on <https://github.com/rusqlite/rusqlite/pull/1010> and wa-sqlite's sahpool.
 
 ## Build
 
