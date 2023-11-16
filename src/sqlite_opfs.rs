@@ -53,13 +53,13 @@ pub struct FileHandle {
 }
 
 /// The pool
-struct Pool {
+pub struct Pool {
     meta_handle: Option<FileSystemSyncAccessHandle>,
     metadata: RwLock<GlobalMetadata>,
     handle_pool: RwLock<HashMap<String, FileSystemSyncAccessHandle>>,
 }
 
-static mut POOL: Lazy<Pool> = Lazy::new(|| Pool {
+pub static mut POOL: Lazy<Pool> = Lazy::new(|| Pool {
     meta_handle: None,
     metadata: RwLock::new(GlobalMetadata {
         version: 1,

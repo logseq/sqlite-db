@@ -97,6 +97,23 @@ pub fn new_db(db: &str) -> Result<(), JsValue> {
 }
 
 #[wasm_bindgen]
+pub fn unsafe_unlink_db(db: &str) -> Result<(), JsValue> {
+    let mut conns = CONNS.lock().unwrap();
+    let conn = conns.remove(db).unwrap().into_inner();
+
+    let sql = "DROP TABLE IF EXISTS blocks";
+    conn.execute(sql, params![]).unwrap();
+
+    conn.close().unwrap();
+
+    unsafe {
+        sqlite_opfs::POOL.delete(db)?;
+    }
+
+    Ok(())
+}
+
+#[wasm_bindgen]
 pub fn delete_blocks(db: &str, uuids: Vec<String>) -> Result<(), JsValue> {
     let conns = CONNS.lock().unwrap();
     let conn = conns.get(db).unwrap().borrow();
@@ -151,6 +168,7 @@ pub fn upsert_blocks(db: &str, blocks: JsValue) -> Result<(), JsValue> {
 
 #[wasm_bindgen]
 pub fn fetch_all_pages(db: &str) -> Result<JsValue, JsValue> {
+    console_log!("fetch_all_pages {}", db);
     let conns = CONNS.lock().unwrap();
     let conn = conns.get(db).unwrap().borrow();
 
