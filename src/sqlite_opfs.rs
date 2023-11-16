@@ -75,6 +75,21 @@ impl Pool {
         meta.files.contains_key(path)
     }
 
+    pub fn list_db(&self) -> Vec<String> {
+        let mut ret = Vec::new();
+        for fname in self.metadata.read().unwrap().files.keys() {
+            // ref: https://www.sqlite.org/tempfiles.html
+            if fname.starts_with("logseq_db_")
+                && !fname.ends_with("-journal")
+                && !fname.ends_with("-wal")
+                && !fname.ends_with("-shm")
+            {
+                ret.push(fname.to_string());
+            }
+        }
+        ret
+    }
+
     fn get_file_handle(&self, path: &str) -> Result<FileSystemSyncAccessHandle, JsValue> {
         let meta = self.metadata.read().unwrap();
         if let Some(mapped_path) = meta.files.get(path) {

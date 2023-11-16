@@ -1,4 +1,8 @@
-use std::{cell::RefCell, collections::HashMap, sync::Mutex};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    sync::{atomic::AtomicBool, Mutex},
+};
 
 use once_cell::sync::Lazy;
 use rusqlite::{named_params, params};
@@ -8,6 +12,8 @@ use wasm_bindgen::prelude::*;
 pub use self::sqlite_opfs::{get_version, has_opfs_support};
 
 mod sqlite_opfs;
+
+static INITED: AtomicBool = AtomicBool::new(false);
 
 #[wasm_bindgen]
 extern "C" {
@@ -26,6 +32,10 @@ macro_rules! console_log {
 /// This should be the only async fn
 #[wasm_bindgen]
 pub async fn init() -> Result<(), JsValue> {
+    if INITED.load(std::sync::atomic::Ordering::Relaxed) {
+        return Ok(());
+    }
+
     console_log!(
         "[logseq-db] init {} {}",
         env!("CARGO_PKG_NAME"),
@@ -35,6 +45,8 @@ pub async fn init() -> Result<(), JsValue> {
     set_panic_hook();
 
     sqlite_opfs::init_sqlite().await.unwrap();
+
+    INITED.store(true, std::sync::atomic::Ordering::Relaxed);
 
     Ok(())
 }
@@ -77,6 +89,11 @@ pub fn open_db(db: &str) -> Result<(), JsValue> {
     new_db(db)?;
 
     Ok(())
+}
+
+#[wasm_bindgen]
+pub fn list_db() -> Vec<String> {
+    unsafe { sqlite_opfs::POOL.list_db() }
 }
 
 #[wasm_bindgen]
