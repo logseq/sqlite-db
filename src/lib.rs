@@ -68,7 +68,25 @@ pub struct Block {
 }
 
 #[wasm_bindgen]
+pub fn open_db(db: &str) -> Result<(), JsValue> {
+    // if already opened, skip
+    if CONNS.lock().unwrap().contains_key(db) {
+        return Ok(());
+    }
+
+    new_db(db)?;
+
+    Ok(())
+}
+
+#[wasm_bindgen]
 pub fn new_db(db: &str) -> Result<(), JsValue> {
+    console_log!("new_db {}", db);
+    // if already opened, skip
+    if CONNS.lock().unwrap().contains_key(db) {
+        return Ok(());
+    }
+
     let conn = rusqlite::Connection::open(db).unwrap();
 
     let sql = r#"
@@ -98,6 +116,11 @@ pub fn new_db(db: &str) -> Result<(), JsValue> {
 
 #[wasm_bindgen]
 pub fn unsafe_unlink_db(db: &str) -> Result<(), JsValue> {
+    console_log!("unsafe_unlink_db {}", db);
+    if !CONNS.lock().unwrap().contains_key(db) {
+        return Ok(());
+    }
+
     let mut conns = CONNS.lock().unwrap();
     let conn = conns.remove(db).unwrap().into_inner();
 
@@ -115,6 +138,9 @@ pub fn unsafe_unlink_db(db: &str) -> Result<(), JsValue> {
 
 #[wasm_bindgen]
 pub fn delete_blocks(db: &str, uuids: Vec<String>) -> Result<(), JsValue> {
+    console_log!("delete_blocks: {:?}", uuids);
+    open_db(db)?;
+
     let conns = CONNS.lock().unwrap();
     let conn = conns.get(db).unwrap().borrow();
 
@@ -129,6 +155,8 @@ pub fn delete_blocks(db: &str, uuids: Vec<String>) -> Result<(), JsValue> {
 #[wasm_bindgen]
 pub fn upsert_blocks(db: &str, blocks: JsValue) -> Result<(), JsValue> {
     console_log!("upsert_blocks: {:?}", blocks);
+    open_db(db)?;
+
     let conns = CONNS.lock().unwrap();
     let mut conn = conns.get(db).unwrap().borrow_mut();
 
@@ -169,6 +197,9 @@ pub fn upsert_blocks(db: &str, blocks: JsValue) -> Result<(), JsValue> {
 #[wasm_bindgen]
 pub fn fetch_all_pages(db: &str) -> Result<JsValue, JsValue> {
     console_log!("fetch_all_pages {}", db);
+
+    open_db(db)?;
+
     let conns = CONNS.lock().unwrap();
     let conn = conns.get(db).unwrap().borrow();
 
@@ -207,6 +238,8 @@ pub struct BlockInfo {
 /// => [{uuid: string, page_uuid: string}]
 #[wasm_bindgen]
 pub fn fetch_all_blocks(db: &str) -> Result<JsValue, JsValue> {
+    open_db(db)?;
+
     let conns = CONNS.lock().unwrap();
     let conn = conns.get(db).unwrap().borrow();
 
@@ -230,7 +263,10 @@ pub fn fetch_all_blocks(db: &str) -> Result<JsValue, JsValue> {
     Ok(serde_wasm_bindgen::to_value(&blocks).unwrap())
 }
 
+#[wasm_bindgen]
 pub fn fetch_recent_journals(db: &str) -> Result<JsValue, JsValue> {
+    open_db(db)?;
+
     let conns = CONNS.lock().unwrap();
     let conn = conns.get(db).unwrap().borrow();
 
@@ -282,6 +318,8 @@ pub fn fetch_recent_journals(db: &str) -> Result<JsValue, JsValue> {
 
 #[wasm_bindgen]
 pub fn fetch_init_data(db: &str) -> Result<JsValue, JsValue> {
+    open_db(db)?;
+
     let conns = CONNS.lock().unwrap();
     let conn = conns.get(db).unwrap().borrow();
 
@@ -314,6 +352,8 @@ pub fn fetch_init_data(db: &str) -> Result<JsValue, JsValue> {
 
 #[wasm_bindgen]
 pub fn fetch_blocks_excluding(db: &str, excluded_uuids: JsValue) -> Result<JsValue, JsValue> {
+    open_db(db)?;
+
     let conns = CONNS.lock().unwrap();
     let conn = conns.get(db).unwrap().borrow();
 
