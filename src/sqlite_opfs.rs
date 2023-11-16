@@ -75,7 +75,7 @@ impl Pool {
         // close all file handles
         let pool = self.handle_pool.write().unwrap();
         for (name, handle) in pool.iter() {
-            console_log!(" {}: {:?}", name, handle);
+            console_log!("closing {}", name);
             handle.close();
         }
 
