@@ -42,16 +42,6 @@ pub async fn init() -> Result<(), JsValue> {
         env!("CARGO_PKG_VERSION")
     );
 
-    set_panic_hook();
-
-    sqlite_opfs::init_sqlite().await.unwrap();
-
-    INITED.store(true, std::sync::atomic::Ordering::Relaxed);
-
-    Ok(())
-}
-
-fn set_panic_hook() {
     // When the `console_error_panic_hook` feature is enabled, we can call the
     // `set_panic_hook` function at least once during initialization, and then
     // we will get better error messages if our code ever panics.
@@ -60,8 +50,26 @@ fn set_panic_hook() {
     // https://github.com/rustwasm/console_error_panic_hook#readme
     #[cfg(feature = "console_error_panic_hook")]
     console_error_panic_hook::set_once();
+
+    sqlite_opfs::init_sqlite().await?;
+
+    INITED.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    Ok(())
 }
 
+/// Dev only, close all files
+#[wasm_bindgen]
+pub async fn dev_close() {
+    // close all db connections, using drop
+    CONNS.lock().unwrap().clear();
+
+    unsafe {
+        sqlite_opfs::POOL.close_all();
+    }
+}
+
+/// DB pool
 static CONNS: Lazy<Mutex<HashMap<String, RefCell<rusqlite::Connection>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
@@ -71,9 +79,9 @@ pub struct Block {
     #[serde(rename = "type")]
     block_type: i32,
     page_uuid: String,
-    page_journal_day: i32,
-    name: String,
-    content: String,
+    page_journal_day: Option<i32>,
+    name: Option<String>, // schema/version
+    content: Option<String>,
     datoms: String,
     created_at: i64,
     updated_at: i64,
@@ -171,7 +179,7 @@ pub fn delete_blocks(db: &str, uuids: Vec<String>) -> Result<(), JsValue> {
 
 #[wasm_bindgen]
 pub fn upsert_blocks(db: &str, blocks: JsValue) -> Result<(), JsValue> {
-    console_log!("upsert_blocks: {:?}", blocks);
+    console_log!("upsert_blocks {}", db);
     open_db(db)?;
 
     let conns = CONNS.lock().unwrap();
@@ -214,7 +222,6 @@ pub fn upsert_blocks(db: &str, blocks: JsValue) -> Result<(), JsValue> {
 #[wasm_bindgen]
 pub fn fetch_all_pages(db: &str) -> Result<JsValue, JsValue> {
     console_log!("fetch_all_pages {}", db);
-
     open_db(db)?;
 
     let conns = CONNS.lock().unwrap();
@@ -414,6 +421,7 @@ pub fn fetch_blocks_excluding(db: &str, excluded_uuids: JsValue) -> Result<JsVal
 
 // unit test
 
+#[cfg(test)]
 pub fn block_db_test() -> Result<(), JsValue> {
     let _ = new_db("my-graph").unwrap();
 
@@ -422,9 +430,9 @@ pub fn block_db_test() -> Result<(), JsValue> {
             uuid: "1".to_string(),
             block_type: 1,
             page_uuid: "1".to_string(),
-            page_journal_day: 1,
-            name: "1".to_string(),
-            content: "1".to_string(),
+            page_journal_day: Some(1),
+            name: Some("1".to_string()),
+            content: Some("1".to_string()),
             datoms: "1".to_string(),
             created_at: 1,
             updated_at: 1,
@@ -433,9 +441,9 @@ pub fn block_db_test() -> Result<(), JsValue> {
             uuid: "2".to_string(),
             block_type: 1,
             page_uuid: "1".to_string(),
-            page_journal_day: 1,
-            name: "2".to_string(),
-            content: "2".to_string(),
+            page_journal_day: Some(20011202),
+            name: Some("2".to_string()),
+            content: None,
             datoms: "2".to_string(),
             created_at: 2,
             updated_at: 2,
@@ -444,9 +452,9 @@ pub fn block_db_test() -> Result<(), JsValue> {
             uuid: "3".to_string(),
             block_type: 1,
             page_uuid: "1".to_string(),
-            page_journal_day: 1,
-            name: "3".to_string(),
-            content: "3".to_string(),
+            page_journal_day: None,
+            name: None,
+            content: Some("3".to_string()),
             datoms: "3".to_string(),
             created_at: 3,
             updated_at: 3,
@@ -473,6 +481,7 @@ pub fn block_db_test() -> Result<(), JsValue> {
     Ok(())
 }
 
+#[cfg(test)]
 pub fn rusqlite_test() -> Result<(), JsValue> {
     use rusqlite::Connection;
 

@@ -70,6 +70,20 @@ pub static mut POOL: Lazy<Pool> = Lazy::new(|| Pool {
 });
 
 impl Pool {
+    /// Dev only. Close all files. The library will be in a unusable state.
+    pub fn close_all(&mut self) {
+        // close all file handles
+        let pool = self.handle_pool.write().unwrap();
+        for (name, handle) in pool.iter() {
+            console_log!(" {}: {:?}", name, handle);
+            handle.close();
+        }
+
+        // close meta handle
+        self.meta_handle.as_ref().unwrap().close();
+        self.meta_handle = None; // avoid overwriting
+    }
+
     pub fn has_file(&self, path: &str) -> bool {
         let meta = self.metadata.read().unwrap();
         meta.files.contains_key(path)
@@ -389,7 +403,6 @@ mod io_methods {
 
         if file.flags & SQLITE_OPEN_DELETEONCLOSE != 0 {
             POOL.delete(&file.fname).unwrap();
-            //   console_log!("delete file {}", file.fname);
         }
 
         let name = mem::take(&mut file.fname);
@@ -405,8 +418,6 @@ mod io_methods {
         offset: sqlite3_int64,
     ) -> c_int {
         let file: *mut FileHandle = arg1 as _;
-
-        // console_log!("{:?} {} @ {}", (*file).fname, amount, offset);
 
         let buf = slice::from_raw_parts_mut(arg2 as *mut u8, amount as usize);
         match POOL.read(&*file, buf, offset) {
@@ -496,7 +507,6 @@ mod io_methods {
         _: *mut sqlite3_file,
         res_out: *mut c_int,
     ) -> c_int {
-        // console_log!("TODO: check reserved lock");
         *res_out = 1;
         SQLITE_OK
     }
@@ -712,21 +722,6 @@ pub fn has_opfs_support() -> bool {
             return false;
         }
     };
-
-    // check SharedArrayBuffer
-    /*  if let Ok(v) = js_sys::Reflect::get(&global_this, &"SharedArrayBuffer".try_into().unwrap()) {
-        if v.is_undefined() {
-            log(&format!("SharedArrayBuffer {:?}", v));
-            log("no SharedArrayBuffer");
-            return false;
-        }
-    }*/
-    if let Ok(v) = js_sys::Reflect::get(&global_this, &"Atomics".try_into().unwrap()) {
-        if v.is_undefined() {
-            log("no Atomics");
-            return false;
-        }
-    }
 
     // check FileSystemSyncAccessHandle
 
