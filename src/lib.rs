@@ -24,7 +24,7 @@ extern "C" {
 #[macro_export]
 macro_rules! console_log {
     ($($arg:tt)*) => {{
-        self::log(&std::format!("{}:{} {}", file!(), line!(), std::format!($($arg)*)));
+        $crate::log(&std::format!("{}:{} {}", file!(), line!(), std::format!($($arg)*)));
     }};
 }
 

@@ -125,10 +125,15 @@ impl Pool {
 
         console_log!("loading init metadata: {:#?}", metadata);
 
-        let entries = list_all_raw_files(&opfs_root).await?;
-        for (path, handle) in entries {
+        for fname in metadata.files.values() {
+            let handle = get_file_handle_from_root(&opfs_root, fname).await?;
             let mut pool = self.handle_pool.write().unwrap();
-            pool.insert(path.clone(), handle);
+            pool.insert(fname.clone(), handle);
+        }
+        for fname in &metadata.empty_files {
+            let handle = get_file_handle_from_root(&opfs_root, fname).await?;
+            let mut pool = self.handle_pool.write().unwrap();
+            pool.insert(fname.clone(), handle);
         }
 
         *self.metadata.write().unwrap() = metadata;
