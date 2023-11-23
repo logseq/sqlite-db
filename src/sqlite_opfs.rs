@@ -18,10 +18,10 @@ use web_sys::{
     FileSystemReadWriteOptions, FileSystemSyncAccessHandle,
 };
 
-use super::{console_log, log};
+use super::console_log;
 
 const METADATA_FILENAME: &str = "metadata.bincode";
-const EMPTY_FILES: usize = 5;
+const EMPTY_FILES: usize = 6; // empty files for a single graph
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GlobalMetadata {
@@ -70,6 +70,77 @@ pub static mut POOL: Lazy<Pool> = Lazy::new(|| Pool {
 });
 
 impl Pool {
+    pub async fn list_db(&mut self) -> Result<Vec<String>, JsValue> {
+        self.init().await?;
+
+        let mut ret = Vec::new();
+        // already loaded
+        for fname in self.metadata.read().unwrap().files.keys() {
+            // ref: https://www.sqlite.org/tempfiles.html
+            if fname.starts_with("logseq_db_")
+                && !fname.ends_with("-journal")
+                && !fname.ends_with("-wal")
+                && !fname.ends_with("-shm")
+            {
+                ret.push(fname.to_string().into());
+            }
+        }
+
+        Ok(ret)
+    }
+
+    // load from metadata.json
+    pub async fn init(&mut self) -> Result<(), JsValue> {
+        if self.meta_handle.is_some() {
+            return Ok(());
+        }
+
+        let global_this = js_sys::global().dyn_into::<web_sys::WorkerGlobalScope>()?;
+        let navigator = global_this.navigator();
+        let opfs_root: FileSystemDirectoryHandle =
+            JsFuture::from(navigator.storage().get_directory())
+                .await?
+                .into();
+
+        let metadata_file = get_file_handle_from_root(&opfs_root, METADATA_FILENAME).await?;
+        // save handle
+        self.meta_handle = Some(metadata_file);
+
+        let meta_size = self.meta_handle()?.get_size()? as usize;
+        let metadata = if meta_size == 0 {
+            // create new metadata
+            GlobalMetadata {
+                version: 1,
+                empty_files: Vec::new(),
+                files: HashMap::new(),
+            }
+        } else {
+            let mut buf = vec![0; meta_size];
+            let _nread = self.meta_handle()?.read_with_u8_array(&mut buf[..])?;
+            let metadata =
+                bincode::deserialize(&buf).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+            metadata
+        };
+
+        console_log!("loading init metadata: {:#?}", metadata);
+
+        let entries = list_all_raw_files(&opfs_root).await?;
+        for (path, handle) in entries {
+            let mut pool = self.handle_pool.write().unwrap();
+            pool.insert(path.clone(), handle);
+        }
+
+        *self.metadata.write().unwrap() = metadata;
+
+        // create more empty files
+        if self.metadata.read().unwrap().empty_files.len() < EMPTY_FILES {
+            self.init_empty_files(&opfs_root, EMPTY_FILES).await?;
+        }
+        self.persist_metadata()?;
+
+        Ok(())
+    }
     /// Dev only. Close all files. The library will be in a unusable state.
     pub fn close_all(&mut self) {
         // close all file handles
@@ -87,21 +158,6 @@ impl Pool {
     pub fn has_file(&self, path: &str) -> bool {
         let meta = self.metadata.read().unwrap();
         meta.files.contains_key(path)
-    }
-
-    pub fn list_db(&self) -> Vec<String> {
-        let mut ret = Vec::new();
-        for fname in self.metadata.read().unwrap().files.keys() {
-            // ref: https://www.sqlite.org/tempfiles.html
-            if fname.starts_with("logseq_db_")
-                && !fname.ends_with("-journal")
-                && !fname.ends_with("-wal")
-                && !fname.ends_with("-shm")
-            {
-                ret.push(fname.to_string());
-            }
-        }
-        ret
     }
 
     fn get_file_handle(&self, path: &str) -> Result<FileSystemSyncAccessHandle, JsValue> {
@@ -268,56 +324,6 @@ impl Pool {
             Err(JsValue::from_str("metadata file is not inited"))
         }
     }
-
-    // load from metadata.json
-    pub async fn init(&mut self) -> Result<(), JsValue> {
-        let global_this = js_sys::global().dyn_into::<web_sys::WorkerGlobalScope>()?;
-        let navigator = global_this.navigator();
-
-        let opfs_root: FileSystemDirectoryHandle =
-            JsFuture::from(navigator.storage().get_directory())
-                .await?
-                .into();
-
-        let metadata_file = get_file_handle_from_root(&opfs_root, METADATA_FILENAME).await?;
-        // save handle
-        self.meta_handle = Some(metadata_file);
-
-        let meta_size = self.meta_handle()?.get_size()? as usize;
-        let metadata = if meta_size == 0 {
-            // create new metadata
-            GlobalMetadata {
-                version: 1,
-                empty_files: Vec::new(),
-                files: HashMap::new(),
-            }
-        } else {
-            let mut buf = vec![0; meta_size];
-            let _nread = self.meta_handle()?.read_with_u8_array(&mut buf[..])?;
-            let metadata =
-                bincode::deserialize(&buf).map_err(|e| JsValue::from_str(&e.to_string()))?;
-
-            metadata
-        };
-
-        console_log!("loading init metadata: {:#?}", metadata);
-
-        let entries = list_all_raw_files(&opfs_root).await?;
-        for (path, handle) in entries {
-            let mut pool = self.handle_pool.write().unwrap();
-            pool.insert(path.clone(), handle);
-        }
-
-        *self.metadata.write().unwrap() = metadata;
-
-        // create more empty files
-        if self.metadata.read().unwrap().empty_files.len() < EMPTY_FILES {
-            self.init_empty_files(&opfs_root, EMPTY_FILES).await?;
-        }
-        self.persist_metadata()?;
-
-        Ok(())
-    }
 }
 
 async fn entries_to_vec(
@@ -376,7 +382,7 @@ async fn get_file_handle_from_root(
     root: &FileSystemDirectoryHandle,
     path: &str,
 ) -> Result<FileSystemSyncAccessHandle, JsValue> {
-    let mut opts = &FileSystemGetFileOptions::default();
+    let mut opts = FileSystemGetFileOptions::default();
     Reflect::set(&mut opts, &"create".into(), &true.into())?;
 
     let handle: FileSystemFileHandle =
@@ -666,7 +672,7 @@ mod opfs_vfs {
     }
 }
 
-pub async fn init_sqlite() -> Result<(), JsValue> {
+pub async fn init_sqlite_vfs() -> Result<(), JsValue> {
     unsafe {
         POOL.init().await?;
     }
@@ -726,17 +732,17 @@ pub fn has_opfs_support() -> bool {
 
     if let Ok(v) = js_sys::Reflect::get(&global_this, &"FileSystemFileHandle".try_into().unwrap()) {
         if v.is_undefined() {
-            log("no Atomics");
+            console_log!("no Atomics");
             return false;
         }
         if let Ok(v) = js_sys::Reflect::get(&v, &"prototype".try_into().unwrap()) {
             if v.is_undefined() {
-                log("no prototype");
+                console_log!("no prototype");
                 return false;
             }
             if let Ok(f) = js_sys::Reflect::get(&v, &"createSyncAccessHandle".try_into().unwrap()) {
                 if f.is_undefined() {
-                    log("no createSyncAccessHandle");
+                    console_log!("no createSyncAccessHandle");
                     return false;
                 }
             }
@@ -745,14 +751,14 @@ pub fn has_opfs_support() -> bool {
 
     if let Ok(v) = js_sys::Reflect::get(&global_this, &"navigator".try_into().unwrap()) {
         if v.is_undefined() {
-            log("no navigator");
+            console_log!("no navigator");
             return false;
         }
     }
     let navigator = global_this.navigator();
     if let Ok(v) = js_sys::Reflect::get(&navigator, &"storage".try_into().unwrap()) {
         if v.is_undefined() {
-            log("no storage");
+            console_log!("no storage");
             return false;
         }
     }
@@ -760,7 +766,7 @@ pub fn has_opfs_support() -> bool {
     let storage = navigator.storage();
     if let Ok(v) = js_sys::Reflect::get(&storage, &"getDirectory".try_into().unwrap()) {
         if v.is_undefined() {
-            log("no getDirectory");
+            console_log!("no getDirectory");
             return false;
         }
     }

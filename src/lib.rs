@@ -31,7 +31,8 @@ macro_rules! console_log {
 /// Init sqlite binding, preload file sync access handles
 /// This should be the only async fn
 #[wasm_bindgen]
-pub async fn init() -> Result<(), JsValue> {
+pub async fn ensure_init() -> Result<(), JsValue> {
+    // avoid reentrant
     if INITED.load(std::sync::atomic::Ordering::Relaxed) {
         return Ok(());
     }
@@ -51,12 +52,19 @@ pub async fn init() -> Result<(), JsValue> {
     #[cfg(feature = "console_error_panic_hook")]
     console_error_panic_hook::set_once();
 
-    sqlite_opfs::init_sqlite().await?;
+    // init VFS backend for SQLite
+    sqlite_opfs::init_sqlite_vfs()
+        .await
+        .map_err(|e| JsValue::from_str(&format!("Failed to init sqlite vfs: {:?}", e)))?;
 
     INITED.store(true, std::sync::atomic::Ordering::Relaxed);
 
     Ok(())
 }
+
+/// DB pool
+static CONNS: Lazy<Mutex<HashMap<String, RefCell<rusqlite::Connection>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Dev only, close all files
 #[wasm_bindgen]
@@ -68,10 +76,6 @@ pub async fn dev_close() {
         sqlite_opfs::POOL.close_all();
     }
 }
-
-/// DB pool
-static CONNS: Lazy<Mutex<HashMap<String, RefCell<rusqlite::Connection>>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Block {
@@ -100,8 +104,11 @@ pub fn open_db(db: &str) -> Result<(), JsValue> {
 }
 
 #[wasm_bindgen]
-pub fn list_db() -> Vec<String> {
-    unsafe { sqlite_opfs::POOL.list_db() }
+pub async fn list_db() -> Result<JsValue, JsValue> {
+    let ret = unsafe { sqlite_opfs::POOL.list_db().await? };
+    // convert Vec<String> to JsValue
+    let ret = serde_wasm_bindgen::to_value(&ret).unwrap();
+    Ok(ret)
 }
 
 #[wasm_bindgen]

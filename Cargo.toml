@@ -1,6 +1,6 @@
 [package]
 name = "logseq-sqlite"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 authors = ["Andelf <andelf@gmail.com>"]
 repository = "https://github.com/logseq/logseq-db"
@@ -19,9 +19,9 @@ crate-type = ["cdylib", "rlib"]
 default = ["console_error_panic_hook"]
 
 [dependencies]
-js-sys = "0.3.64"
-wasm-bindgen = "0.2.87"
-web-sys = { version = "0.3.64", features = [
+js-sys = "0.3.65"
+wasm-bindgen = "0.2.88"
+web-sys = { version = "0.3.65", features = [
     "console",
     "FileSystemHandle",
     "FileSystemHandleKind",
@@ -42,19 +42,24 @@ web-sys = { version = "0.3.64", features = [
     "FileSystemGetFileOptions",
     "FileSystemSyncAccessHandle",
     "FileSystemReadWriteOptions",
+    "BroadcastChannel",
+    "AddEventListenerOptions",
+    "EventTarget",
+    "EventListener",
+    "Event",
 ] }
 
 # The `console_error_panic_hook` crate provides better debugging of panics by
 # logging them with `console.error`. This is great for development, but requires
 # all the `std::fmt` and `std::panicking` infrastructure, so isn't great for
 # code size when deploying.
-console_error_panic_hook = { version = "0.1.6", optional = true }
-wasm-bindgen-futures = "0.4.37"
+console_error_panic_hook = { version = "0.1.7", optional = true }
+wasm-bindgen-futures = "0.4.38"
 
 getrandom = { version = "0.2", features = ["js"] }
 uuid = { version = "1.5.0", features = ["v4"] }
 once_cell = "1.18.0"
-serde = { version = "1.0.189", features = ["derive"] }
+serde = { version = "1.0.193", features = ["derive"] }
 serde-wasm-bindgen = "0.6.0"
 rusqlite = { version = "0.29.0", features = ["bundled"] }
 libsqlite3-sys = { path = "./libsqlite3-sys", features = ["bundled"] }
