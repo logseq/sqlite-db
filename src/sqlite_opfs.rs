@@ -146,6 +146,25 @@ impl Pool {
 
         Ok(())
     }
+
+    pub fn deinit(&mut self) {
+        {
+            let mut pool = self.handle_pool.write().unwrap();
+            for (name, handle) in pool.drain() {
+                console_log!("closing {}", name);
+                handle.close();
+            }
+        }
+
+        self.meta_handle.as_ref().unwrap().close();
+        self.metadata = RwLock::new(GlobalMetadata {
+            version: 1,
+            empty_files: Vec::new(),
+            files: HashMap::new(),
+        });
+        self.meta_handle = None; // avoid overwriting
+    }
+
     /// Dev only. Close all files. The library will be in a unusable state.
     pub fn close_all(&mut self) {
         // close all file handles
