@@ -66,6 +66,8 @@ pub async fn ensure_init() -> Result<(), JsValue> {
 static CONNS: Lazy<Mutex<HashMap<String, RefCell<rusqlite::Connection>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+static CURRENT_GRAPH: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new("".to_string()));
+
 /// Dev only, close all files
 #[wasm_bindgen]
 pub async fn dev_close() {
@@ -104,6 +106,9 @@ pub async fn init_db(db: &str) -> Result<(), JsValue> {
         conns.clear(); // close all db connections, using drop
         sqlite_opfs::POOL.deinit();
         sqlite_opfs::POOL.init(db).await?;
+
+        // set current graph
+        *CURRENT_GRAPH.lock().unwrap() = db.to_string();
     }
 
     drop(conns);
@@ -139,6 +144,11 @@ pub fn new_db(db: &str) -> Result<(), JsValue> {
     // if already opened, skip
     if CONNS.lock().unwrap().contains_key(db) {
         return Ok(());
+    }
+
+    // check current graph
+    if *CURRENT_GRAPH.lock().unwrap() != db {
+        return Err(JsValue::from_str(&format!("Current graph is not inited yet {}", db)));
     }
 
     let conn = rusqlite::Connection::open(db).unwrap();
