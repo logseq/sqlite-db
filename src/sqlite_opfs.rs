@@ -234,7 +234,6 @@ impl Pool {
     }
 
     fn get_or_create_file(&self, path: &str) -> Result<FileSystemSyncAccessHandle, JsValue> {
-        console_log!("get_or_create_file {}", path);
         if let Ok(handle) = self.get_file_handle(path) {
             return Ok(handle);
         } else {

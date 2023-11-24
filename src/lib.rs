@@ -95,12 +95,13 @@ pub struct Block {
 pub async fn init_db(db: &str) -> Result<(), JsValue> {
     console_log!("init_db {}", db);
     // if already opened, skip
-    let conns = CONNS.lock().unwrap();
+    let mut conns = CONNS.lock().unwrap();
     if conns.contains_key(db) {
         return Ok(());
     }
 
     unsafe {
+        conns.clear(); // close all db connections, using drop
         sqlite_opfs::POOL.deinit();
         sqlite_opfs::POOL.init(db).await?;
     }
@@ -207,7 +208,6 @@ pub fn delete_blocks(db: &str, uuids: Vec<String>) -> Result<(), JsValue> {
 
 #[wasm_bindgen]
 pub fn upsert_blocks(db: &str, blocks: JsValue) -> Result<(), JsValue> {
-    console_log!("upsert_blocks {}", db);
     open_db(db)?;
 
     let conns = CONNS.lock().unwrap();
@@ -245,7 +245,6 @@ pub fn upsert_blocks(db: &str, blocks: JsValue) -> Result<(), JsValue> {
 
     tx.commit().unwrap();
 
-    console_log!("upsert_blocks done");
     Ok(())
 }
 
