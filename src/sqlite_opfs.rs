@@ -28,7 +28,6 @@ use web_sys::{
 
 use super::console_log;
 
-const METADATA_FILENAME: &str = "metadata.bincode";
 const EMPTY_FILES: usize = 6; // empty files for a single graph
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -373,47 +372,6 @@ impl Pool {
     }
 }
 
-async fn entries_to_vec(
-    entries: &JsValue,
-) -> Result<Vec<(String, FileSystemSyncAccessHandle)>, JsValue> {
-    let mut ret = Vec::new();
-    let next_fn: Function = Reflect::get(entries, &"next".into())?.unchecked_into();
-    let arr = Array::new();
-
-    let mut entry_fut: Promise = Reflect::apply(&next_fn, entries, &arr)?.into();
-    let mut entry = JsFuture::from(entry_fut).await?;
-
-    // access the iteractor
-    let mut done = Reflect::get(&entry, &"done".into())?.as_bool().unwrap();
-    while !done {
-        // Array<[string, FileSystemFileHandle]>
-        let value: Array = Reflect::get(&entry, &"value".into())?.into();
-        // console_log!("value: {:?}", value);
-
-        let path = value.get(0).as_string().unwrap();
-        let handle = value.get(1).unchecked_into::<FileSystemFileHandle>();
-
-        // only cares about .raw files
-        if path.ends_with(".raw") {
-            let sync_handle: FileSystemSyncAccessHandle =
-                JsFuture::from(handle.create_sync_access_handle())
-                    .await?
-                    .into();
-
-            // console_log!("item path: {} {:?}", path, sync_handle);
-            ret.push((path, sync_handle));
-        }
-
-        // ret.push(value.as_string().unwrap());
-
-        entry_fut = Reflect::apply(&next_fn, entries, &arr)?.into();
-        entry = JsFuture::from(entry_fut).await?;
-
-        done = Reflect::get(&entry, &"done".into())?.as_bool().unwrap();
-    }
-    Ok(ret)
-}
-
 async fn list_all_filenames(root: &FileSystemDirectoryHandle) -> Result<Vec<String>, JsValue> {
     let entries_fn = Reflect::get(&root, &"entries".into())?;
     let entries = Reflect::apply(entries_fn.unchecked_ref(), &root, &Array::new())?;
@@ -442,17 +400,6 @@ async fn list_all_filenames(root: &FileSystemDirectoryHandle) -> Result<Vec<Stri
         done = Reflect::get(&entry, &"done".into())?.as_bool().unwrap();
     }
     Ok(ret)
-}
-
-async fn list_all_raw_files(
-    root: &FileSystemDirectoryHandle,
-) -> Result<Vec<(String, FileSystemSyncAccessHandle)>, JsValue> {
-    let entries_fn = Reflect::get(&root, &"entries".into())?;
-    let entries = Reflect::apply(entries_fn.unchecked_ref(), &root, &Array::new())?;
-
-    let entries = entries_to_vec(&entries).await?;
-    // console_log!("entries: {:#?}", entries);
-    Ok(entries)
 }
 
 async fn get_file_handle_from_root(
