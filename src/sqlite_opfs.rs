@@ -1,3 +1,11 @@
+//! SQLite3 OPFS support
+//!
+//! Use pre-allocated files to avoid async file access.
+//!
+//! ## Files
+//! - logseq_metadata_*.bincode: metadata file
+//! - [UUID].raw: data file
+
 use core::slice;
 use std::{
     collections::HashMap,
@@ -71,18 +79,24 @@ pub static mut POOL: Lazy<Pool> = Lazy::new(|| Pool {
 
 impl Pool {
     pub async fn list_db(&mut self) -> Result<Vec<String>, JsValue> {
-        self.init().await?;
+        let global_this = js_sys::global().dyn_into::<web_sys::WorkerGlobalScope>()?;
+        let navigator = global_this.navigator();
+        let opfs_root: FileSystemDirectoryHandle =
+            JsFuture::from(navigator.storage().get_directory())
+                .await?
+                .into();
+
+        let filenames = list_all_filenames(&opfs_root).await?;
+        console_log!("filenames {:?}", filenames);
 
         let mut ret = Vec::new();
-        // already loaded
-        for fname in self.metadata.read().unwrap().files.keys() {
+        for fname in filenames {
             // ref: https://www.sqlite.org/tempfiles.html
-            if fname.starts_with("logseq_db_")
-                && !fname.ends_with("-journal")
-                && !fname.ends_with("-wal")
-                && !fname.ends_with("-shm")
-            {
-                ret.push(fname.to_string().into());
+            if fname.starts_with("logseq_metadata_") && fname.ends_with(".bincode") {
+                let db_name = fname
+                    .trim_start_matches("logseq_metadata_")
+                    .trim_end_matches(".bincode");
+                ret.push(format!("logseq_db_{}", db_name));
             }
         }
 
@@ -90,7 +104,7 @@ impl Pool {
     }
 
     // load from metadata.json
-    pub async fn init(&mut self) -> Result<(), JsValue> {
+    pub async fn init(&mut self, db_name: &str) -> Result<(), JsValue> {
         if self.meta_handle.is_some() {
             return Ok(());
         }
@@ -102,7 +116,12 @@ impl Pool {
                 .await?
                 .into();
 
-        let metadata_file = get_file_handle_from_root(&opfs_root, METADATA_FILENAME).await?;
+        let metadata_filename = format!(
+            "logseq_metadata_{}.bincode",
+            db_name.trim_start_matches("logseq_db_")
+        );
+        console_log!("metadata file: {}", metadata_filename);
+        let metadata_file = get_file_handle_from_root(&opfs_root, &metadata_filename).await?;
         // save handle
         self.meta_handle = Some(metadata_file);
 
@@ -148,6 +167,10 @@ impl Pool {
     }
 
     pub fn deinit(&mut self) {
+        if self.meta_handle.is_none() {
+            return;
+        }
+
         {
             let mut pool = self.handle_pool.write().unwrap();
             for (name, handle) in pool.drain() {
@@ -211,6 +234,7 @@ impl Pool {
     }
 
     fn get_or_create_file(&self, path: &str) -> Result<FileSystemSyncAccessHandle, JsValue> {
+        console_log!("get_or_create_file {}", path);
         if let Ok(handle) = self.get_file_handle(path) {
             return Ok(handle);
         } else {
@@ -384,6 +408,36 @@ async fn entries_to_vec(
         // ret.push(value.as_string().unwrap());
 
         entry_fut = Reflect::apply(&next_fn, entries, &arr)?.into();
+        entry = JsFuture::from(entry_fut).await?;
+
+        done = Reflect::get(&entry, &"done".into())?.as_bool().unwrap();
+    }
+    Ok(ret)
+}
+
+async fn list_all_filenames(root: &FileSystemDirectoryHandle) -> Result<Vec<String>, JsValue> {
+    let entries_fn = Reflect::get(&root, &"entries".into())?;
+    let entries = Reflect::apply(entries_fn.unchecked_ref(), &root, &Array::new())?;
+
+    let mut ret = Vec::new();
+    let next_fn: Function = Reflect::get(&entries, &"next".into())?.unchecked_into();
+    let arr = Array::new();
+
+    let mut entry_fut: Promise = Reflect::apply(&next_fn, &entries, &arr)?.into();
+    let mut entry = JsFuture::from(entry_fut).await?;
+
+    // access the iteractor
+    let mut done = Reflect::get(&entry, &"done".into())?.as_bool().unwrap();
+    while !done {
+        // Array<[string, FileSystemFileHandle]>
+        let value: Array = Reflect::get(&entry, &"value".into())?.into();
+        // console_log!("value: {:?}", value);
+
+        let path = value.get(0).as_string().unwrap();
+        ret.push(path);
+        // ret.push(value.as_string().unwrap());
+
+        entry_fut = Reflect::apply(&next_fn, &entries, &arr)?.into();
         entry = JsFuture::from(entry_fut).await?;
 
         done = Reflect::get(&entry, &"done".into())?.as_bool().unwrap();
@@ -697,10 +751,6 @@ mod opfs_vfs {
 }
 
 pub async fn init_sqlite_vfs() -> Result<(), JsValue> {
-    unsafe {
-        POOL.init().await?;
-    }
-
     let vfs = sqlite3_vfs {
         iVersion: 1,
         szOsFile: std::mem::size_of::<FileHandle>() as _, // size of sqlite3_file

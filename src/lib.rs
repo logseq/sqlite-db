@@ -92,6 +92,27 @@ pub struct Block {
 }
 
 #[wasm_bindgen]
+pub async fn init_db(db: &str) -> Result<(), JsValue> {
+    console_log!("init_db {}", db);
+    // if already opened, skip
+    let conns = CONNS.lock().unwrap();
+    if conns.contains_key(db) {
+        return Ok(());
+    }
+
+    unsafe {
+        sqlite_opfs::POOL.deinit();
+        sqlite_opfs::POOL.init(db).await?;
+    }
+
+    drop(conns);
+
+    new_db(db)?;
+
+    Ok(())
+}
+
+#[wasm_bindgen]
 pub fn open_db(db: &str) -> Result<(), JsValue> {
     // if already opened, skip
     if CONNS.lock().unwrap().contains_key(db) {
@@ -223,6 +244,8 @@ pub fn upsert_blocks(db: &str, blocks: JsValue) -> Result<(), JsValue> {
     }
 
     tx.commit().unwrap();
+
+    console_log!("upsert_blocks done");
     Ok(())
 }
 
@@ -253,7 +276,7 @@ pub fn fetch_all_pages(db: &str) -> Result<JsValue, JsValue> {
 
     let mut pages = Vec::new();
     for page in pages_iter {
-        pages.push(page.unwrap());
+        pages.push(page.map_err(|e| JsValue::from_str(&format!("{:?}", e)))?);
     }
 
     Ok(serde_wasm_bindgen::to_value(&pages).unwrap())
