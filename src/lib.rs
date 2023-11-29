@@ -227,17 +227,24 @@ pub fn delete_blocks(db: &str, uuids: Vec<String>) -> Result<(), JsValue> {
 
 #[wasm_bindgen]
 pub fn upsert_addr_content(db: &str, data: JsValue) -> Result<(), JsValue> {
+    console_log!("upsert_addr_content {}", db);
     open_db(db)?;
     let conns = CONNS.lock().unwrap();
     let mut conn = conns.get(db).unwrap().borrow_mut();
 
     let tx = conn
         .transaction()
-        .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+        .map_err(|e| JsValue::from_str(&format!("upsert_addr_content: {:?}", e)))?;
 
     let sql = r#"INSERT INTO kvs (addr, content) values (@addr, @content) on conflict(addr) do update set content = @content"#;
 
-    let payload: Vec<AddrContent> = serde_wasm_bindgen::from_value(data).unwrap();
+    let payload: Vec<AddrContent> =
+        serde_wasm_bindgen::from_value(data).map_err(|e| {
+            JsValue::from_str(&format!(
+                "Failed to deserialize AddrContent from JsValue: {:?}",
+                e
+            ))
+        })?; // Vec<AddrContent>
 
     for item in payload {
         tx.execute(
@@ -247,27 +254,36 @@ pub fn upsert_addr_content(db: &str, data: JsValue) -> Result<(), JsValue> {
                 "@content": item.content,
             },
         )
-        .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+        .map_err(|e| JsValue::from_str(&format!("execute: {:?}", e)))?;
     }
 
     tx.commit()
-        .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+        .map_err(|e| JsValue::from_str(&format!("commit: {:?}", e)))?;
 
     Ok(())
 }
 
 #[wasm_bindgen]
-pub fn get_content_by_addr(db: &str, addr: i64) -> Result<JsValue, JsValue> {
+pub fn get_content_by_addr(db: &str, addr: JsValue) -> Result<JsValue, JsValue> {
     open_db(db)?;
     let conns = CONNS.lock().unwrap();
     let conn = conns.get(db).unwrap().borrow();
 
-    let mut stmt = conn.prepare("SELECT content FROM kvs WHERE addr = ?").unwrap();
+    let addr = addr.as_f64().unwrap() as i64;
+    console_log!("get_content_by_addr {} {:?}", db, addr);
+
+    let mut stmt = conn
+        .prepare("SELECT content FROM kvs WHERE addr = ?")
+        .unwrap();
     let mut rows = stmt.query(params![addr]).unwrap();
 
-    let content: String = rows.next().unwrap().unwrap().get(0).unwrap();
+    if let Ok(Some(row)) = rows.next() {
+        if let Ok(content) = row.get::<_, String>(0) {
+            return Ok(JsValue::from_str(&content));
+        }
+    }
 
-    Ok(JsValue::from_str(&content))
+    Ok(JsValue::null())
 }
 
 #[wasm_bindgen]
