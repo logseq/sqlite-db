@@ -1,6 +1,6 @@
 [package]
 name = "logseq-sqlite"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 authors = ["Andelf <andelf@gmail.com>"]
 repository = "https://github.com/logseq/logseq-db"

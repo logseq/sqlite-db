@@ -93,6 +93,12 @@ pub struct Block {
     updated_at: i64,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct AddrContent {
+    addr: i64,
+    content: String,
+}
+
 #[wasm_bindgen]
 pub async fn init_db(db: &str) -> Result<(), JsValue> {
     console_log!("init_db {}", db);
@@ -170,6 +176,9 @@ pub fn new_db(db: &str) -> Result<(), JsValue> {
     let sql = "CREATE INDEX IF NOT EXISTS block_type ON blocks(type)";
     conn.execute(sql, params![]).unwrap();
 
+    let sql = "CREATE TABLE IF NOT EXISTS kvs (addr INTEGER PRIMARY KEY, content TEXT)";
+    conn.execute(sql, params![]).unwrap();
+
     CONNS
         .lock()
         .unwrap()
@@ -217,9 +226,53 @@ pub fn delete_blocks(db: &str, uuids: Vec<String>) -> Result<(), JsValue> {
 }
 
 #[wasm_bindgen]
+pub fn upsert_addr_content(db: &str, data: JsValue) -> Result<(), JsValue> {
+    open_db(db)?;
+    let conns = CONNS.lock().unwrap();
+    let mut conn = conns.get(db).unwrap().borrow_mut();
+
+    let tx = conn
+        .transaction()
+        .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+
+    let sql = r#"INSERT INTO kvs (addr, content) values (@addr, @content) on conflict(addr) do update set content = @content"#;
+
+    let payload: Vec<AddrContent> = serde_wasm_bindgen::from_value(data).unwrap();
+
+    for item in payload {
+        tx.execute(
+            sql,
+            named_params! {
+                "@addr": item.addr,
+                "@content": item.content,
+            },
+        )
+        .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+    }
+
+    tx.commit()
+        .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+
+    Ok(())
+}
+
+#[wasm_bindgen]
+pub fn get_content_by_addr(db: &str, addr: i64) -> Result<JsValue, JsValue> {
+    open_db(db)?;
+    let conns = CONNS.lock().unwrap();
+    let conn = conns.get(db).unwrap().borrow();
+
+    let mut stmt = conn.prepare("SELECT content FROM kvs WHERE addr = ?").unwrap();
+    let mut rows = stmt.query(params![addr]).unwrap();
+
+    let content: String = rows.next().unwrap().unwrap().get(0).unwrap();
+
+    Ok(JsValue::from_str(&content))
+}
+
+#[wasm_bindgen]
 pub fn upsert_blocks(db: &str, blocks: JsValue) -> Result<(), JsValue> {
     open_db(db)?;
-
     let conns = CONNS.lock().unwrap();
     let mut conn = conns.get(db).unwrap().borrow_mut();
 
