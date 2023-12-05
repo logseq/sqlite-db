@@ -154,7 +154,7 @@ pub fn new_db(db: &str) -> Result<(), JsValue> {
 
     // check current graph
     if *CURRENT_GRAPH.lock().unwrap() != db {
-        return Err(JsValue::from_str(&format!("Current graph is not inited yet {}", db)));
+        return Err(JsValue::from_str(&format!("Current graph is not inited yet: {}", db)));
     }
 
     let conn = rusqlite::Connection::open(db).unwrap();
@@ -529,7 +529,6 @@ pub fn fetch_blocks_excluding(db: &str, excluded_uuids: JsValue) -> Result<JsVal
 
 // unit test
 
-#[cfg(test)]
 pub fn block_db_test() -> Result<(), JsValue> {
     let _ = new_db("my-graph").unwrap();
 

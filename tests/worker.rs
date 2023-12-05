@@ -23,7 +23,9 @@ async fn opfs_ok() {
 
 #[wasm_bindgen_test]
 async fn library_init() {
-    logseq_sqlite::init().await.unwrap();
+    logseq_sqlite::ensure_init().await.unwrap();
+
+    logseq_sqlite::init_db("my-graph").await.unwrap();
 
     // logseq_sqlite::rusqlite_test().unwrap();
 
